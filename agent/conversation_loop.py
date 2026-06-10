@@ -2204,7 +2204,8 @@ def run_conversation(
 
                 # ── Classify the error for structured recovery decisions ──
                 _compressor = getattr(agent, "context_compressor", None)
-                _ctx_len = getattr(_compressor, "context_length", 200000) if _compressor else 200000
+                _std_ctx = int(os.environ.get("HERMES_STANDARD_CTX", 200000))
+                _ctx_len = getattr(_compressor, "context_length", _std_ctx) if _compressor else _std_ctx
                 classified = classify_api_error(
                     api_error,
                     provider=getattr(agent, "provider", "") or "",
@@ -2707,7 +2708,7 @@ def run_conversation(
                 # credentials won't help.  Reduce context to 200k (the
                 # standard tier) and compress.
                 if classified.reason == FailoverReason.long_context_tier:
-                    _reduced_ctx = 200000
+                    _reduced_ctx = int(os.environ.get("HERMES_STANDARD_CTX", 200000))
                     compressor = agent.context_compressor
                     old_ctx = compressor.context_length
                     if old_ctx > _reduced_ctx:

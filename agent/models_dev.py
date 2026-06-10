@@ -19,6 +19,7 @@ rather than parsing the raw JSON themselves.
 """
 
 import json
+import os
 import logging
 import time
 from dataclasses import dataclass
@@ -491,7 +492,8 @@ def get_model_capabilities(provider: str, model: str) -> Optional[ModelCapabilit
         limit = {}
 
     ctx = limit.get("context")
-    context_window = int(ctx) if isinstance(ctx, (int, float)) and ctx > 0 else 200000
+    _default_ctx = int(os.environ.get("HERMES_DEFAULT_CTX", 200000))
+    context_window = int(ctx) if isinstance(ctx, (int, float)) and ctx > 0 else _default_ctx
 
     out = limit.get("output")
     max_output_tokens = int(out) if isinstance(out, (int, float)) and out > 0 else 8192
