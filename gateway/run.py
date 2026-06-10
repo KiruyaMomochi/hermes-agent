@@ -9133,6 +9133,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                 elif _stale_adapter and hasattr(_stale_adapter, "_post_delivery_callbacks"):
                     _stale_adapter._post_delivery_callbacks.pop(_quick_key, None)
+                # Persist the user message even when the agent run is
+                # discarded (e.g. /stop interrupted it).  Without this,
+                # /retry cannot find the message and operates on an older
+                # user turn, silently dropping intermediate history.
+                # See: https://github.com/NousResearch/hermes-agent/issues/5244
+                if message_text:
+                    _stale_user_entry = {
+                        "role": "user",
+                        "content": message_text,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                    if event.message_id:
+                        _stale_user_entry["message_id"] = str(event.message_id)
+                    self.session_store.append_to_transcript(
+                        session_entry.session_id, _stale_user_entry,
+                    )
                 return None
 
             response = agent_result.get("final_response") or ""
