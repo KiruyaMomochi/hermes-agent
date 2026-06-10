@@ -259,6 +259,24 @@ if _REVIEW_OVERRIDES:
         _v = _REVIEW_OVERRIDES["_COMBINED_REVIEW_PROMPT"]
         _COMBINED_REVIEW_PROMPT = _v if _v is not None else ""
 
+# Toolset and tools-hint overrides (configurable via prompt_overrides.yaml)
+_BACKGROUND_REVIEW_TOOLSETS = ["memory", "skills", "file"]
+_BACKGROUND_REVIEW_TOOLS_HINT = (
+    "\n\nYou can call memory, skill management, "
+    "and file tools (read_file, write_file, patch, "
+    "search_files). Other tools will be denied "
+    "at runtime — do not attempt them."
+)
+
+if _REVIEW_OVERRIDES:
+    if "_BACKGROUND_REVIEW_TOOLSETS" in _REVIEW_OVERRIDES:
+        _v = _REVIEW_OVERRIDES["_BACKGROUND_REVIEW_TOOLSETS"]
+        if isinstance(_v, list):
+            _BACKGROUND_REVIEW_TOOLSETS = _v
+    if "_BACKGROUND_REVIEW_TOOLS_HINT" in _REVIEW_OVERRIDES:
+        _v = _REVIEW_OVERRIDES["_BACKGROUND_REVIEW_TOOLS_HINT"]
+        _BACKGROUND_REVIEW_TOOLS_HINT = _v if _v is not None else ""
+
 
 
 def summarize_background_review_actions(
@@ -598,7 +616,7 @@ def _run_review_in_thread(
             review_whitelist = {
                 t["function"]["name"]
                 for t in get_tool_definitions(
-                    enabled_toolsets=["memory", "skills"],
+                    enabled_toolsets=_BACKGROUND_REVIEW_TOOLSETS,
                     quiet_mode=True,
                 )
             }
@@ -613,9 +631,7 @@ def _run_review_in_thread(
                 review_agent.run_conversation(
                     user_message=(
                         prompt
-                        + "\n\nYou can only call memory and skill "
-                        "management tools. Other tools will be denied "
-                        "at runtime — do not attempt them."
+                        + _BACKGROUND_REVIEW_TOOLS_HINT
                     ),
                     conversation_history=messages_snapshot,
                 )
