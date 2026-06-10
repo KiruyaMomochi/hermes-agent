@@ -31,6 +31,7 @@ from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.display import KawaiiSpinner
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.iteration_budget import IterationBudget
+from agent.context_control import load_settings as _load_context_control
 from agent.turn_context import build_turn_context
 from agent.turn_retry_state import TurnRetryState
 from agent.memory_manager import build_memory_context_block
@@ -719,17 +720,32 @@ def run_conversation(
             # API-call-time only — the original message in `messages` is
             # never mutated, so nothing leaks into session persistence.
             if idx == current_turn_user_idx and msg.get("role") == "user":
+                _ctx_settings = _load_context_control()
                 _injections = []
-                if _ext_prefetch_cache:
+                if _ext_prefetch_cache and _ctx_settings.enabled:
                     _fenced = build_memory_context_block(_ext_prefetch_cache)
                     if _fenced:
-                        _injections.append(_fenced)
+                        if _ctx_settings.position == "system":
+                            # Inject into ephemeral system prompt instead of
+                            # user message.  Preserves cached system prompt
+                            # prefix while still surfacing context.
+                            if not agent.ephemeral_system_prompt:
+                                agent.ephemeral_system_prompt = _fenced
+                            else:
+                                agent.ephemeral_system_prompt = (
+                                    agent.ephemeral_system_prompt + "\n\n" + _fenced
+                                )
+                        else:
+                            _injections.append(_fenced)
                 if _plugin_user_context:
                     _injections.append(_plugin_user_context)
                 if _injections:
                     _base = api_msg.get("content", "")
                     if isinstance(_base, str):
-                        api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
+                        if _ctx_settings.position == "before":
+                            api_msg["content"] = "\n\n".join(_injections) + "\n\n" + _base
+                        else:
+                            api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
 
             # For ALL assistant messages, pass reasoning back to the API
             # This ensures multi-turn reasoning context is preserved

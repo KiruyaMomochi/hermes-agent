@@ -2004,23 +2004,27 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
         def _run():
             try:
+                from agent.context_control import load_settings as _load_ctx
+                _ctx = _load_ctx()
+                if not _ctx.enabled:
+                    return
                 client = _VikingClient(
                     self._endpoint, self._api_key,
                     account=self._account, user=self._user, agent=self._agent,
                 )
                 resp = client.post("/api/v1/search/find", {
                     "query": query,
-                    "limit": 5,
+                    "top_k": _ctx.top_k,
                 })
                 result = resp.get("result", {})
                 parts = []
                 for ctx_type in ("memories", "resources"):
                     items = result.get(ctx_type, [])
-                    for item in items[:3]:
+                    for item in items[:_ctx.max_items]:
                         uri = item.get("uri", "")
                         abstract = item.get("abstract", "")
                         score = item.get("score", 0)
-                        if abstract:
+                        if abstract and score >= _ctx.min_score:
                             parts.append(f"- [{score:.2f}] {abstract} ({uri})")
                 if parts:
                     with self._prefetch_lock:
