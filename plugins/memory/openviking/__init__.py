@@ -29,6 +29,7 @@ import atexit
 import json
 import logging
 import mimetypes
+import re
 import os
 import re
 import shutil

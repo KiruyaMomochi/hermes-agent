@@ -11,6 +11,7 @@ Tests cover:
 import threading
 import time
 import types
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 
@@ -316,6 +317,98 @@ class TestPendingTitleValueError:
             )
         finally:
             server._sessions.pop("sid", None)
+
+
+# ===========================================================================
+# Gateway inbound timestamp prefixes
+# ===========================================================================
+
+class TestGatewayInboundTimestampPrefix:
+    """Gateway user turns get a wall-clock prefix after a >=1 minute gap."""
+
+    def test_no_prefix_without_previous_user_message(self):
+        from gateway.run import _prepend_inbound_timestamp_prefix
+
+        now = datetime(2026, 6, 10, 15, 32)
+        assert _prepend_inbound_timestamp_prefix(
+            "hello", current=now, previous=None,
+        ) == "hello"
+
+    def test_no_prefix_for_fast_followup_under_one_minute(self):
+        from gateway.run import _prepend_inbound_timestamp_prefix
+
+        previous = datetime(2026, 6, 10, 15, 31, 30)
+        current = previous + timedelta(seconds=59)
+        assert _prepend_inbound_timestamp_prefix(
+            "hello", current=current, previous=previous,
+        ) == "hello"
+
+    def test_same_day_prefix_after_one_minute(self):
+        from gateway.run import _prepend_inbound_timestamp_prefix
+
+        previous = datetime(2026, 6, 10, 15, 31)
+        current = previous + timedelta(seconds=60)
+        assert _prepend_inbound_timestamp_prefix(
+            "hello", current=current, previous=previous,
+        ) == "[15:32] hello"
+
+    def test_cross_day_prefix_after_one_minute(self):
+        from gateway.run import _prepend_inbound_timestamp_prefix
+
+        previous = datetime(2026, 6, 10, 23, 59)
+        current = datetime(2026, 6, 11, 0, 3)
+        assert _prepend_inbound_timestamp_prefix(
+            "hello", current=current, previous=previous,
+        ) == "[06-11 00:03] hello"
+
+    def test_history_lookup_uses_last_user_timestamp_only(self):
+        from gateway.run import _last_user_message_datetime
+
+        earlier = datetime(2026, 6, 10, 12, 0)
+        later = datetime(2026, 6, 10, 15, 31)
+        history = [
+            {"role": "user", "content": "first", "timestamp": earlier.isoformat()},
+            {"role": "assistant", "content": "ok", "timestamp": "2026-06-10T15:00:00"},
+            {"role": "user", "content": "second", "timestamp": later.isoformat()},
+            {"role": "assistant", "content": "ok", "timestamp": "2026-06-10T15:31:30"},
+        ]
+
+        assert _last_user_message_datetime(history) == later
+
+
+# ===========================================================================
+# Gateway current-turn DB prefix detection
+# ===========================================================================
+
+class TestGatewayCurrentTurnDbPrefix:
+    """Gateway mirror fallback must not duplicate image/multipart turns."""
+
+    def test_image_attachment_path_line_does_not_break_prefix_match(self):
+        from gateway.run import _count_gateway_current_turn_db_prefix
+
+        persisted = [
+            {
+                "role": "user",
+                "content": (
+                    "[05:38] hello\n\n"
+                    "[Image attached at: /home/user/.hermes/image_cache/img_x.jpg]\n"
+                    "[screenshot]"
+                ),
+            },
+            {"role": "assistant", "content": "ok"},
+        ]
+        expected_entries = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "[05:38] hello"},
+                    {"type": "image_url", "image_url": {"url": "file:///tmp/img_x.jpg"}},
+                ],
+            },
+            {"role": "assistant", "content": "ok"},
+        ]
+
+        assert _count_gateway_current_turn_db_prefix(persisted, expected_entries) == 2
 
 
 # ===========================================================================

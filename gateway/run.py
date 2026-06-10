@@ -618,6 +618,61 @@ def _is_fresh_gateway_interruption(
     return current - timestamp <= window
 
 
+_INBOUND_TIMESTAMP_PREFIX_MIN_GAP_SECS = 60.0
+
+
+def _local_datetime(value: Any) -> Optional[datetime]:
+    """Coerce a gateway timestamp-like value to local wall-clock datetime."""
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone().replace(tzinfo=None)
+        return value
+    timestamp = _coerce_gateway_timestamp(value)
+    if timestamp is None:
+        return None
+    try:
+        return datetime.fromtimestamp(timestamp)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _last_user_message_datetime(history: List[Dict[str, Any]]) -> Optional[datetime]:
+    """Return the local timestamp of the last user row in transcript history."""
+    for msg in reversed(history or []):
+        if msg.get("role") != "user":
+            continue
+        timestamp = _local_datetime(msg.get("timestamp"))
+        if timestamp is not None:
+            return timestamp
+    return None
+
+
+def _inbound_timestamp_prefix(
+    current: datetime,
+    previous: Optional[datetime],
+) -> str:
+    """Return the gateway inbound time prefix for a >=1 minute user gap."""
+    if previous is None:
+        return ""
+    if (current - previous).total_seconds() < _INBOUND_TIMESTAMP_PREFIX_MIN_GAP_SECS:
+        return ""
+    if current.date() == previous.date():
+        return current.strftime("[%H:%M]")
+    return current.strftime("[%m-%d %H:%M]")
+
+
+def _prepend_inbound_timestamp_prefix(
+    message_text: str,
+    *,
+    current: datetime,
+    previous: Optional[datetime],
+) -> str:
+    prefix = _inbound_timestamp_prefix(current, previous)
+    if not prefix:
+        return message_text
+    return f"{prefix} {message_text}"
+
+
 # Assistant-message fields that must survive transcript replay so multi-turn
 # reasoning context, prefix-cache hits, and provider-specific echo
 # requirements all behave the same on the gateway as they do in the CLI.
@@ -692,6 +747,16 @@ def _build_replay_entry(role: str, content: Any, msg: Dict[str, Any]) -> Dict[st
 def _message_content_for_db_compare(content: Any) -> Any:
     """Normalize an agent message content value to the form stored in state.db."""
 
+    def _normalize_text(text: Any) -> str:
+        value = str(text or "")
+        lines = [
+            line.rstrip()
+            for line in value.splitlines()
+            if not re.fullmatch(r"\[Image attached at: [^\]]+\]", line.strip())
+        ]
+        value = "\n".join(lines)
+        return re.sub(r"\n{2,}", "\n", value).strip()
+
     if isinstance(content, list):
         parts = []
         for part in content:
@@ -701,8 +766,8 @@ def _message_content_for_db_compare(content: Any) -> Any:
                 parts.append(str(part.get("text", "")))
             elif part.get("type") in {"image", "image_url", "input_image"}:
                 parts.append("[screenshot]")
-        return "\n".join(parts) if parts else None
-    return content
+        return _normalize_text("\n".join(parts)) if parts else None
+    return _normalize_text(content)
 
 
 def _count_gateway_current_turn_db_prefix(
@@ -742,7 +807,8 @@ def _count_gateway_current_turn_db_prefix(
         want = expected[:prefix_len]
         if all(
             stored.get("role") == expected_msg.get("role")
-            and stored.get("content") == expected_msg.get("content")
+            and _message_content_for_db_compare(stored.get("content"))
+            == expected_msg.get("content")
             for stored, expected_msg in zip(tail, want)
         ):
             return prefix_len
@@ -8098,12 +8164,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         history = history or []
         message_text = event.text or ""
-        _group_sessions_per_user = getattr(self.config, "group_sessions_per_user", True)
-        _thread_sessions_per_user = getattr(self.config, "thread_sessions_per_user", False)
         # Use the same helper every other call site uses so the write key here
         # matches the consume key at the run_conversation site — even if the
         # session store overrides build_session_key's default behavior.
         session_key = self._session_key_for_source(source)
+        now = _local_datetime(getattr(event, "timestamp", None)) or datetime.now()
+        previous_user_at = getattr(self, "_last_user_message_at_by_session", {}).get(
+            session_key,
+        )
+        previous_user_at = previous_user_at or _last_user_message_datetime(history)
+        message_text = _prepend_inbound_timestamp_prefix(
+            message_text,
+            current=now,
+            previous=previous_user_at,
+        )
+        if session_key:
+            last_user_by_session = getattr(self, "_last_user_message_at_by_session", None)
+            if last_user_by_session is None:
+                last_user_by_session = {}
+                self._last_user_message_at_by_session = last_user_by_session
+            last_user_by_session[session_key] = now
+        _group_sessions_per_user = getattr(self.config, "group_sessions_per_user", True)
+        _thread_sessions_per_user = getattr(self.config, "thread_sessions_per_user", False)
         # Reset only this session's per-call buffer; other sessions may be
         # concurrently preparing multimodal turns on the same runner.
         self._consume_pending_native_image_paths(session_key)
@@ -8483,6 +8565,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # or a queued "/model switched" note.
             self._session_model_overrides.pop(session_key, None)
             self._set_session_reasoning_override(session_key, None)
+            getattr(self, "_last_user_message_at_by_session", {}).pop(session_key, None)
             if hasattr(self, "_pending_model_notes"):
                 self._pending_model_notes.pop(session_key, None)
         
