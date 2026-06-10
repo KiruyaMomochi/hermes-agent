@@ -21,6 +21,7 @@ import logging
 import queue
 import re
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -183,6 +184,23 @@ class GatewayStreamConsumer:
         self._in_think_block = False
         self._think_buffer = ""
 
+        # Telegram reply splitting: when enabled by the adapter, a standalone
+        # --- line seals the current streaming bubble and routes subsequent
+        # content into a fresh message. Detection is stateful so a delimiter
+        # split across token chunks ("-" then "--\n") is still caught.
+        self._split_replies_enabled = bool(getattr(adapter, "_split_replies_enabled", False))
+        self._split_replay: deque[str] = deque()
+        self._split_delimiter_buffer = ""
+        self._split_at_line_start = True
+        self._split_line_text = ""
+        self._split_in_code_fence = False
+        self._split_replies_delivered_segments = False
+        # Variable inter-bubble pause: a delimiter of N>=3 dashes seals the
+        # current bubble and asks for a delay of (N-3)*0.3s before the next
+        # one streams. Stored here when a split fires; consumed and reset to
+        # zero in run() right after the split-driven segment reset.
+        self._split_delay_seconds: float = 0.0
+
         # Native draft-streaming state.  Resolved at the start of run() based
         # on cfg.transport, cfg.chat_type, and the adapter's
         # supports_draft_streaming() probe.  When True, the consumer emits
@@ -290,12 +308,20 @@ class GatewayStreamConsumer:
         except Exception:
             logger.debug("on_new_message callback error", exc_info=True)
 
-    def _reset_segment_state(self, *, preserve_no_edit: bool = False) -> None:
+    def _reset_segment_state(
+        self,
+        *,
+        preserve_no_edit: bool = False,
+        preserve_split_delivery: bool = False,
+    ) -> None:
         if preserve_no_edit and self._message_id == "__no_edit__":
             return
         self._message_id = None
         self._message_created_ts = None
         self._accumulated = ""
+        self._reset_split_detector()
+        if not preserve_split_delivery:
+            self._split_replies_delivered_segments = False
         self._last_sent_text = ""
         self._fallback_final_send = False
         self._fallback_prefix = ""
@@ -316,6 +342,12 @@ class GatewayStreamConsumer:
         if self._use_draft_streaming:
             type(self)._draft_id_counter += 1
             self._draft_id = type(self)._draft_id_counter
+
+    def _reset_split_detector(self) -> None:
+        self._split_delimiter_buffer = ""
+        self._split_at_line_start = True
+        self._split_line_text = ""
+        self._split_in_code_fence = False
 
     def on_delta(self, text: str) -> None:
         """Thread-safe callback — called from the agent's worker thread.
@@ -341,13 +373,16 @@ class GatewayStreamConsumer:
     # response (run_agent.py _strip_think_blocks), but the stream
     # consumer sends intermediate edits before that stripping happens.
 
-    def _filter_and_accumulate(self, text: str) -> None:
+    def _filter_and_accumulate(self, text: str) -> bool:
         """Add a text delta to the accumulated buffer, suppressing think blocks.
 
         Uses a state machine that tracks whether we are inside a
-        reasoning/thinking block.  Text inside such blocks is silently
-        discarded.  Partial tags at buffer boundaries are held back in
+        reasoning/thinking block. Text inside such blocks is silently
+        discarded. Partial tags at buffer boundaries are held back in
         ``_think_buffer`` until enough characters arrive to decide.
+
+        Returns True when a streaming reply delimiter finalized the current
+        message and queued the remainder for the next segment.
         """
         buf = self._think_buffer + text
         self._think_buffer = ""
@@ -372,7 +407,7 @@ class GatewayStreamConsumer:
                     # partial closing tag prefix, discard the rest.
                     max_tag = max(len(t) for t in self._CLOSE_THINK_TAGS)
                     self._think_buffer = buf[-max_tag:] if len(buf) > max_tag else buf
-                    return
+                    return False
             else:
                 # Look for earliest opening tag at a block boundary
                 # (start of text / preceded by newline + optional whitespace).
@@ -412,7 +447,9 @@ class GatewayStreamConsumer:
 
                 if best_len:
                     # Emit text before the tag, enter think block
-                    self._accumulated += buf[:best_idx]
+                    if self._accumulate_visible_text(buf[:best_idx]):
+                        self._split_replay.appendleft(buf[best_idx:])
+                        return True
                     self._in_think_block = True
                     buf = buf[best_idx + best_len:]
                 else:
@@ -423,11 +460,86 @@ class GatewayStreamConsumer:
                             if buf.endswith(tag[:i]) and i > held_back:
                                 held_back = i
                     if held_back:
-                        self._accumulated += buf[:-held_back]
+                        visible = buf[:-held_back]
+                        if self._accumulate_visible_text(visible):
+                            self._split_replay.appendleft(buf[len(visible):])
+                            return True
                         self._think_buffer = buf[-held_back:]
                     else:
-                        self._accumulated += buf
-                    return
+                        if self._accumulate_visible_text(buf):
+                            return True
+                    return False
+        return False
+
+    def _accumulate_visible_text(self, text: str) -> bool:
+        """Append visible text, detecting streaming split delimiters.
+
+        A delimiter is a standalone ``---`` line at the start of a stream or
+        immediately after a newline. Fenced code blocks are respected, and a
+        possible delimiter is held across chunk boundaries until the following
+        byte proves or disproves it.
+        """
+        if not text:
+            return False
+        if not self._split_replies_enabled:
+            self._accumulated += text
+            return False
+
+        idx = 0
+        while idx < len(text):
+            ch = text[idx]
+
+            if (
+                self._split_at_line_start
+                and not self._split_in_code_fence
+                and (self._split_delimiter_buffer or ch == "-")
+            ):
+                if ch == "-":
+                    self._split_delimiter_buffer += ch
+                    idx += 1
+                    if idx == len(text):
+                        return False
+                    continue
+                if len(self._split_delimiter_buffer) >= 3 and ch == "\n":
+                    dash_count = len(self._split_delimiter_buffer)
+                    self._split_delay_seconds = max(0.0, (dash_count - 3) * 0.3)
+                    tail = text[idx + 1:]
+                    if tail:
+                        self._split_replay.appendleft(tail)
+                    self._accumulated = self._accumulated.rstrip("\n")
+                    self._split_delimiter_buffer = ""
+                    self._split_at_line_start = True
+                    self._split_line_text = ""
+                    return True
+                self._flush_split_delimiter_buffer()
+                continue
+
+            if self._split_delimiter_buffer:
+                self._flush_split_delimiter_buffer()
+                continue
+
+            self._accumulated += ch
+            self._split_line_text += ch
+            idx += 1
+
+            if ch == "\n":
+                if self._split_line_text.lstrip().startswith("```"):
+                    self._split_in_code_fence = not self._split_in_code_fence
+                self._split_line_text = ""
+                self._split_at_line_start = True
+            else:
+                self._split_at_line_start = False
+
+        return False
+
+    def _flush_split_delimiter_buffer(self) -> None:
+        if not self._split_delimiter_buffer:
+            return
+        pending = self._split_delimiter_buffer
+        self._split_delimiter_buffer = ""
+        self._accumulated += pending
+        self._split_line_text += pending
+        self._split_at_line_start = False
 
     def _flush_think_buffer(self) -> None:
         """Flush any held-back partial-tag buffer into accumulated text.
@@ -436,8 +548,9 @@ class GatewayStreamConsumer:
         was held back waiting for a possible opening tag is not lost.
         """
         if self._think_buffer and not self._in_think_block:
-            self._accumulated += self._think_buffer
+            self._accumulate_visible_text(self._think_buffer)
             self._think_buffer = ""
+        self._flush_split_delimiter_buffer()
 
     async def run(self) -> None:
         """Async task that drains the queue and edits the platform message."""
@@ -476,10 +589,14 @@ class GatewayStreamConsumer:
                 # Drain all available items from the queue
                 got_done = False
                 got_segment_break = False
+                got_split_reply_break = False
                 commentary_text = None
                 while True:
                     try:
-                        item = self._queue.get_nowait()
+                        if self._split_replay:
+                            item = self._split_replay.popleft()
+                        else:
+                            item = self._queue.get_nowait()
                         if item is _DONE:
                             got_done = True
                             break
@@ -489,7 +606,10 @@ class GatewayStreamConsumer:
                         if isinstance(item, tuple) and len(item) == 2 and item[0] is _COMMENTARY:
                             commentary_text = item[1]
                             break
-                        self._filter_and_accumulate(item)
+                        if self._filter_and_accumulate(item):
+                            got_segment_break = True
+                            got_split_reply_break = True
+                            break
                     except queue.Empty:
                         break
 
@@ -613,13 +733,29 @@ class GatewayStreamConsumer:
                     current_update_visible = await self._send_or_edit(
                         display_text,
                         finalize=(got_done or got_segment_break),
-                        # A segment-break finalize closes a preamble, not the
-                        # turn-final answer — only got_done marks delivered (#29346).
-                        is_turn_final=got_done,
+                        # Delimiter-driven breaks are pieces of the same final
+                        # answer. Tool/commentary segment breaks are preambles
+                        # and must not suppress the real final send (#29346).
+                        is_turn_final=(got_done or got_split_reply_break),
                     )
+                    if got_split_reply_break and current_update_visible:
+                        self._split_replies_delivered_segments = True
+                        # Subsequent bubbles should not reply to the user msg
+                        self._initial_reply_to_id = None
                     self._last_edit_time = time.monotonic()
 
                 if got_done:
+                    # If delimiter-split streaming already delivered one or more
+                    # final-answer bubbles, the gateway normal final-send path
+                    # must be suppressed.  Otherwise adapter.send() will split
+                    # the full logical answer on the same `---` lines and post
+                    # the entire multi-bubble response a second time.  Do not
+                    # suppress when fallback mode is active because a delivered
+                    # prefix may still need its missing tail.
+                    if self._split_replies_delivered_segments and not self._fallback_final_send:
+                        self._final_response_sent = True
+                        self._final_content_delivered = True
+                        return
                     # Final edit without cursor. If progressive editing failed
                     # mid-stream, send a single continuation/fallback message
                     # here instead of letting the base gateway path send the
@@ -676,6 +812,13 @@ class GatewayStreamConsumer:
                             self._final_response_sent = await self._send_or_edit(self._accumulated)
                             if self._final_response_sent:
                                 self._final_content_delivered = True
+                    elif self._split_replies_delivered_segments:
+                        # All delimiter-separated Telegram bubbles were already
+                        # finalized during streaming; the final logical response
+                        # still contains the delimiters, so the gateway's normal
+                        # adapter.send() path would split and deliver it again.
+                        self._final_response_sent = True
+                        self._final_content_delivered = True
                     return
 
                 if commentary_text is not None:
@@ -714,7 +857,18 @@ class GatewayStreamConsumer:
                         and self._message_id != "__no_edit__"
                     ):
                         await self._flush_segment_tail_on_edit_failure()
-                    self._reset_segment_state(preserve_no_edit=True)
+                    self._reset_segment_state(
+                        preserve_no_edit=True,
+                        preserve_split_delivery=got_split_reply_break,
+                    )
+                    # Variable inter-bubble pause: a delimiter of 4+ dashes
+                    # asks for a deliberate gap before the next bubble streams
+                    # (3 dashes => 0s, same as before). Sleep here, after the
+                    # segment reset, then clear so it never leaks into a later
+                    # non-delayed split.
+                    if got_split_reply_break and self._split_delay_seconds > 0:
+                        await asyncio.sleep(self._split_delay_seconds)
+                    self._split_delay_seconds = 0.0
 
                 await asyncio.sleep(0.05)  # Small yield to not busy-loop
 

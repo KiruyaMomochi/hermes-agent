@@ -67,6 +67,15 @@ _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
+# The stream consumer can legitimately need more than a few seconds to flush a
+# turn-final response when Telegram reply splitting is enabled: each `---`
+# delimiter becomes a separate sendMessage call, and Telegram/network latency is
+# serial.  A 5s drain timeout races with that finalization path, leaving
+# `final_response_sent` unset so the gateway's normal send path splits and
+# posts the full logical response a second time.  Keep this finite so a broken
+# stream consumer cannot hang a gateway turn forever, but long enough for
+# ordinary multi-bubble replies to finish and set the suppression flags.
+_STREAM_CONSUMER_DRAIN_TIMEOUT_SECS = 30.0
 
 _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r"("  # transient/auxiliary status that should stay in logs, not Telegram chat
@@ -13796,7 +13805,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _stream_consumer.finish()
             if stream_task:
                 try:
-                    await asyncio.wait_for(stream_task, timeout=5.0)
+                    await asyncio.wait_for(stream_task, timeout=_STREAM_CONSUMER_DRAIN_TIMEOUT_SECS)
                 except (asyncio.TimeoutError, asyncio.CancelledError):
                     stream_task.cancel()
 
@@ -16222,7 +16231,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _sc = stream_consumer_holder[0]
                     if _sc and stream_task:
                         try:
-                            await asyncio.wait_for(stream_task, timeout=5.0)
+                            await asyncio.wait_for(stream_task, timeout=_STREAM_CONSUMER_DRAIN_TIMEOUT_SECS)
                         except (asyncio.TimeoutError, asyncio.CancelledError):
                             stream_task.cancel()
                             try:
@@ -16361,7 +16370,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         pass
                 else:
                     try:
-                        await asyncio.wait_for(stream_task, timeout=5.0)
+                        await asyncio.wait_for(stream_task, timeout=_STREAM_CONSUMER_DRAIN_TIMEOUT_SECS)
                     except (asyncio.TimeoutError, asyncio.CancelledError):
                         stream_task.cancel()
                         try:

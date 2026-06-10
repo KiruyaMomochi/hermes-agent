@@ -1,12 +1,29 @@
 """Tests for GatewayStreamConsumer — media directive stripping in streaming."""
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
+
+
+class TestGatewayStreamConsumerDrainTimeout:
+    def test_timeout_allows_slow_split_flush(self):
+        """Gateway must wait long enough for Telegram `---` split replies.
+
+        The duplicate-delivery regression happened when the hard-coded 5s
+        drain timeout cancelled the stream consumer while it was still
+        serially sending split bubbles.  The consumer had not set
+        final_response_sent yet, so gateway.run fell through to adapter.send()
+        and split+posted the same logical final_response again.
+        """
+        run_py = Path(__file__).resolve().parents[2] / "gateway" / "run.py"
+        source = run_py.read_text(encoding="utf-8")
+        assert "_STREAM_CONSUMER_DRAIN_TIMEOUT_SECS = 30.0" in source
+        assert "timeout=_STREAM_CONSUMER_DRAIN_TIMEOUT_SECS" in source
 
 
 # ── _clean_for_display unit tests ────────────────────────────────────────
@@ -974,6 +991,40 @@ class TestFinalResponseDeliveryGuard:
         await task
 
         assert consumer._final_response_sent is True
+
+    @pytest.mark.asyncio
+    async def test_delimiter_split_delivery_suppresses_redundant_final_finalize(self):
+        """Delimiter-split Telegram streaming already delivered final bubbles;
+        got_done must not re-finalize the same logical answer again."""
+        adapter = MagicMock()
+        adapter._split_replies_enabled = True
+        adapter.REQUIRES_EDIT_FINALIZE = True
+        adapter.send = AsyncMock(side_effect=[
+            SimpleNamespace(success=True, message_id="msg_a"),
+            SimpleNamespace(success=True, message_id="msg_b"),
+        ])
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True),
+        )
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        config = StreamConsumerConfig(edit_interval=60.0, buffer_threshold=1)
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        consumer.on_delta("first\n---\nsecond")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.1)
+        consumer.finish()
+        await task
+
+        assert [c.kwargs["content"] for c in adapter.send.await_args_list] == [
+            "first",
+            f"second{config.cursor}",
+        ]
+        adapter.edit_message.assert_awaited_once()
+        assert adapter.edit_message.await_args.kwargs["content"] == "second"
+        assert consumer._final_response_sent is True
+        assert consumer._final_content_delivered is True
 
 
 class TestFinalContentDeliveredGuard:
@@ -1947,4 +1998,73 @@ class TestUtf16OverflowDetection:
         # auto-attr mock. Verified indirectly by all the other tests in
         # this file passing — they all use MagicMock adapters.
         assert consumer is not None
+
+
+def _make_split_consumer() -> GatewayStreamConsumer:
+    """Consumer with reply-splitting enabled and a clean detector state."""
+    adapter = MagicMock()
+    c = GatewayStreamConsumer(adapter, "chat_split")
+    c._split_replies_enabled = True
+    c._accumulated = ""
+    c._split_delay_seconds = 0.0
+    c._reset_split_detector()
+    return c
+
+
+class TestVariableDelaySplit:
+    """Unit tests for the 3+ dash delimiter and dash-count-driven delay."""
+
+    def test_three_dashes_still_splits(self):
+        """Backward compat: exactly --- splits with zero delay."""
+        c = _make_split_consumer()
+        fired = c._accumulate_visible_text("first bubble\n---\nsecond bubble")
+        assert fired is True
+        assert c._accumulated == "first bubble"
+        assert c._split_delay_seconds == 0.0
+        # The tail after the delimiter is replayed into the next bubble.
+        assert "".join(c._split_replay) == "second bubble"
+
+    def test_four_dashes_adds_delay(self):
+        c = _make_split_consumer()
+        fired = c._accumulate_visible_text("a\n----\nb")
+        assert fired is True
+        assert c._accumulated == "a"
+        assert c._split_delay_seconds == pytest.approx(0.3)
+
+    def test_five_dashes_adds_more_delay(self):
+        c = _make_split_consumer()
+        fired = c._accumulate_visible_text("a\n-----\nb")
+        assert fired is True
+        assert c._split_delay_seconds == pytest.approx(0.6)
+
+    def test_many_dashes_no_upper_cap(self):
+        c = _make_split_consumer()
+        # 13 dashes => (13 - 3) * 0.3 = 3.0s, no clamping.
+        c._accumulate_visible_text("a\n" + "-" * 13 + "\nb")
+        assert c._split_delay_seconds == pytest.approx(3.0)
+
+    def test_dashes_split_across_chunks(self):
+        """A delimiter delivered byte-by-byte across deltas still fires."""
+        c = _make_split_consumer()
+        assert c._accumulate_visible_text("line\n") is False
+        for ch in "-----":
+            assert c._accumulate_visible_text(ch) is False
+        fired = c._accumulate_visible_text("\n")
+        assert fired is True
+        assert c._split_delay_seconds == pytest.approx(0.6)
+
+    def test_code_fence_dashes_do_not_split(self):
+        """Many dashes inside a fenced code block must not trigger a split."""
+        c = _make_split_consumer()
+        fired = c._accumulate_visible_text("```\n-----\n```\nafter")
+        assert fired is False
+        assert "-----" in c._accumulated
+        assert c._split_delay_seconds == 0.0
+
+    def test_two_dashes_do_not_split(self):
+        """Fewer than 3 dashes is not a delimiter."""
+        c = _make_split_consumer()
+        fired = c._accumulate_visible_text("a\n--\nb")
+        assert fired is False
+        assert "--" in c._accumulated
 
