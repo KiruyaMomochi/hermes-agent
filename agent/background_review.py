@@ -27,6 +27,20 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Load review prompt overrides from prompt_overrides.yaml
+# ---------------------------------------------------------------------------
+def _get_review_overrides() -> dict:
+    """Retrieve review prompt overrides from the shared override store."""
+    try:
+        from agent.prompt_builder import _PROMPT_OVERRIDES
+        return _PROMPT_OVERRIDES
+    except Exception:
+        return {}
+
+_REVIEW_OVERRIDES = _get_review_overrides()
+
+
 # Review-prompt strings — used by ``spawn_background_review_thread`` to build
 # the user-message that the forked review agent receives.  AIAgent exposes
 # them as class attributes (``_MEMORY_REVIEW_PROMPT`` etc.) for back-compat;
@@ -231,6 +245,19 @@ _COMBINED_REVIEW_PROMPT = (
     "genuinely nothing stands out on either, say 'Nothing to save.' "
     "and stop — but don't reach for that conclusion as a default."
 )
+
+
+# Apply overrides from prompt_overrides.yaml
+if _REVIEW_OVERRIDES:
+    if "_MEMORY_REVIEW_PROMPT" in _REVIEW_OVERRIDES:
+        _v = _REVIEW_OVERRIDES["_MEMORY_REVIEW_PROMPT"]
+        _MEMORY_REVIEW_PROMPT = _v if _v is not None else ""
+    if "_SKILL_REVIEW_PROMPT" in _REVIEW_OVERRIDES:
+        _v = _REVIEW_OVERRIDES["_SKILL_REVIEW_PROMPT"]
+        _SKILL_REVIEW_PROMPT = _v if _v is not None else ""
+    if "_COMBINED_REVIEW_PROMPT" in _REVIEW_OVERRIDES:
+        _v = _REVIEW_OVERRIDES["_COMBINED_REVIEW_PROMPT"]
+        _COMBINED_REVIEW_PROMPT = _v if _v is not None else ""
 
 
 
