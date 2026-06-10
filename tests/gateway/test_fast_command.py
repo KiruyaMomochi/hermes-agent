@@ -193,3 +193,171 @@ async def test_run_agent_passes_priority_processing_to_gateway_agent(monkeypatch
     assert result["final_response"] == "ok"
     assert _CapturingAgent.last_init["service_tier"] == "priority"
     assert _CapturingAgent.last_init["request_overrides"] == {"service_tier": "priority"}
+
+
+@pytest.mark.asyncio
+async def test_run_agent_persists_plain_text_for_native_image_turn(monkeypatch, tmp_path):
+    _install_fake_agent(monkeypatch)
+    runner = _make_runner()
+
+    image_path = tmp_path / "photo.jpg"
+    image_path.write_bytes(b"fake image bytes")
+    session_key = "agent:main:telegram:dm:12345"
+    runner._pending_native_image_paths_by_session = {session_key: [str(image_path)]}
+
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "_load_gateway_runtime_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "gpt-5.4")
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {
+            "provider": "openrouter",
+            "api_mode": "chat_completions",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "***",
+        },
+    )
+
+    import hermes_cli.tools_config as tools_config
+    monkeypatch.setattr(tools_config, "_get_platform_tools", lambda user_config, platform_key: {"core"})
+
+    result = await runner._run_agent(
+        message="[14:02]",
+        context_prompt="",
+        history=[],
+        source=_make_source(),
+        session_id="session-1",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "ok"
+    assert _CapturingAgent.last_run is not None
+    assert isinstance(_CapturingAgent.last_run["user_message"], list)
+    assert _CapturingAgent.last_run["persist_user_message"] == "[14:02]"
+
+
+class _RecordingSessionDB:
+    def __init__(self):
+        self.messages = []
+
+    def append_message(self, session_id, role, content, **kwargs):
+        self.messages.append({
+            "session_id": session_id,
+            "role": role,
+            "content": content,
+            **kwargs,
+        })
+
+
+def test_persist_user_message_override_does_not_strip_openai_image_url_parts(monkeypatch):
+    from run_agent import AIAgent
+
+    captured_api_messages = []
+    agent = AIAgent(
+        api_key="test-key",
+        base_url="https://example.test/v1",
+        model="test-model",
+        api_mode="chat_completions",
+        max_iterations=1,
+        quiet_mode=True,
+        enabled_toolsets=[],
+        session_id="session-vision-openai",
+    )
+    agent._session_db = _RecordingSessionDB()
+    agent._session_db_created = True
+    agent._save_session_log = lambda messages: None
+    agent._cached_system_prompt = "system"
+    agent._disable_streaming = True
+    monkeypatch.setattr(agent, "_model_supports_vision", lambda: True)
+
+    def fake_api_call(api_kwargs):
+        captured_api_messages.extend(api_kwargs["messages"])
+        return types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(content="saw it", tool_calls=None),
+                    finish_reason="stop",
+                )
+            ]
+        )
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", fake_api_call)
+
+    image_only_parts = [
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,ZmFrZQ=="},
+        }
+    ]
+    result = agent.run_conversation(
+        image_only_parts,
+        persist_user_message="",
+        conversation_history=[],
+    )
+
+    assert result["final_response"] == "saw it"
+    api_user_messages = [m for m in captured_api_messages if m.get("role") == "user"]
+    assert isinstance(api_user_messages[-1]["content"], list)
+    assert any(p.get("type") == "image_url" for p in api_user_messages[-1]["content"])
+    assert result["messages"][0]["content"] == image_only_parts
+    persisted_users = [m for m in agent._session_db.messages if m["role"] == "user"]
+    assert persisted_users
+    assert persisted_users[0]["content"] == ""
+
+
+def test_persist_user_message_override_does_not_strip_anthropic_image_parts(monkeypatch):
+    from run_agent import AIAgent
+
+    captured_api_messages = []
+    agent = AIAgent(
+        api_key="test-key",
+        base_url="https://example.test/v1",
+        model="claude-test",
+        api_mode="anthropic_messages",
+        max_iterations=1,
+        quiet_mode=True,
+        enabled_toolsets=[],
+        session_id="session-vision-anthropic",
+    )
+    agent._session_db = _RecordingSessionDB()
+    agent._session_db_created = True
+    agent._save_session_log = lambda messages: None
+    agent._cached_system_prompt = "system"
+    agent._disable_streaming = True
+    monkeypatch.setattr(agent, "_model_supports_vision", lambda: True)
+
+    def fake_api_call(api_kwargs):
+        captured_api_messages.extend(api_kwargs["messages"])
+        return types.SimpleNamespace(
+            content=[types.SimpleNamespace(type="text", text="saw it")],
+            stop_reason="end_turn",
+            usage=types.SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", fake_api_call)
+
+    image_only_parts = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "ZmFrZQ==",
+            },
+        }
+    ]
+    result = agent.run_conversation(
+        image_only_parts,
+        persist_user_message="",
+        conversation_history=[],
+    )
+
+    assert result["final_response"] == "saw it"
+    api_user_messages = [m for m in captured_api_messages if m.get("role") == "user"]
+    assert isinstance(api_user_messages[-1]["content"], list)
+    assert any(p.get("type") == "image" for p in api_user_messages[-1]["content"])
+    assert result["messages"][0]["content"] == image_only_parts
+    persisted_users = [m for m in agent._session_db.messages if m["role"] == "user"]
+    assert persisted_users
+    assert persisted_users[0]["content"] == ""

@@ -1926,10 +1926,11 @@ def _convert_user_message(content: Any) -> Dict[str, Any]:
     """Validate and convert a user message to anthropic format."""
     if isinstance(content, list):
         converted_blocks = _convert_content_to_anthropic(content)
-        if not converted_blocks or all(
-            b.get("text", "").strip() == ""
+        if not converted_blocks or not any(
+            isinstance(b, dict) and (
+                b.get("type") != "text" or b.get("text", "").strip()
+            )
             for b in converted_blocks
-            if isinstance(b, dict) and b.get("type") == "text"
         ):
             converted_blocks = [{"type": "text", "text": "(empty message)"}]
         return {"role": "user", "content": converted_blocks}

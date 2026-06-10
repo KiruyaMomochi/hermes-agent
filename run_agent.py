@@ -1471,9 +1471,9 @@ class AIAgent:
         Some call paths need an API-only user-message variant without letting
         that synthetic text leak into persisted transcripts or resumed session
         history. When an override is configured for the active turn, mutate the
-        in-memory messages list in place so both persistence and returned
-        history stay clean.  A paired timestamp override preserves the platform
-        event time as message metadata, rather than embedding it in content.
+        provided messages list in place so persistence and returned history stay
+        clean.  A paired timestamp override preserves the platform event time
+        as message metadata, rather than embedding it in content.
         """
         idx = getattr(self, "_persist_user_message_idx", None)
         override = getattr(self, "_persist_user_message_override", None)
@@ -1496,16 +1496,49 @@ class AIAgent:
                 if timestamp is not None:
                     msg["timestamp"] = timestamp
 
+    def _messages_for_persistence(self, messages: List[Dict]) -> List[Dict]:
+        """Return the message view used for persistence without mutating live context.
+
+        Gateway native-image turns pass multimodal ``user_message`` content to
+        the provider but use ``persist_user_message`` to keep transcripts and
+        SessionDB rows text-only.  The early turn-start persistence path runs
+        before the first provider request, so applying the override directly to
+        ``messages`` strips image/image_url parts before the model sees them.
+
+        Keep the live list intact and replace only the current user message in a
+        shallow list copy.  Existing history dicts retain identity so the DB
+        flusher's history-skip logic still works; the copied current-turn dict
+        carries the original object's id so repeated early/final persistence
+        calls de-duplicate the same turn.
+        """
+        idx = getattr(self, "_persist_user_message_idx", None)
+        override = getattr(self, "_persist_user_message_override", None)
+        timestamp = getattr(self, "_persist_user_message_timestamp", None)
+        if idx is None or (override is None and timestamp is None):
+            return messages
+        if not (0 <= idx < len(messages)):
+            return messages
+        msg = messages[idx]
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            return messages
+
+        persistence_messages = list(messages)
+        persistence_msg = msg.copy()
+        persistence_msg["_persist_source_id"] = id(msg)
+        persistence_messages[idx] = persistence_msg
+        self._apply_persist_user_message_override(persistence_messages)
+        return persistence_messages
+
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Save session state to both JSON log and SQLite on any exit path.
 
         Ensures conversations are never lost, even on errors or early returns.
         """
         self._drop_trailing_empty_response_scaffolding(messages)
-        self._apply_persist_user_message_override(messages)
-        self._session_messages = messages
-        self._save_session_log(messages)
-        self._flush_messages_to_session_db(messages, conversation_history)
+        persistence_messages = self._messages_for_persistence(messages)
+        self._session_messages = persistence_messages
+        self._save_session_log(persistence_messages)
+        self._flush_messages_to_session_db(persistence_messages, conversation_history)
 
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
         """Remove private empty-response retry/failure scaffolding from transcript tails.
@@ -1609,10 +1642,11 @@ class AIAgent:
             for msg in messages:
                 if not isinstance(msg, dict):
                     continue
-                msg_id = id(msg)
+                source_msg_id = msg.get("_persist_source_id")
+                msg_id = source_msg_id or id(msg)
                 if msg_id in flushed_ids:
                     continue
-                if msg_id in history_ids:
+                if source_msg_id is None and msg_id in history_ids:
                     flushed_ids.add(msg_id)
                     continue
                 role = msg.get("role", "unknown")
