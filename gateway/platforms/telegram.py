@@ -2498,15 +2498,14 @@ class TelegramAdapter(BasePlatformAdapter):
                 reply_to_source = reply_to or (
                     str(metadata_reply_to) if private_dm_topic_send and metadata_reply_to is not None else None
                 )
-                if private_dm_topic_send:
-                    should_thread = (
-                        reply_to_source is not None
-                        and self._reply_to_mode != "off"
-                    )
-                else:
-                    should_thread = self._should_thread_reply(reply_to_source, i)
+                should_thread = self._should_thread_reply(reply_to_source, i)
                 reply_to_id = int(reply_to_source) if should_thread and reply_to_source else None
-                if private_dm_topic_send and reply_to_id is None and not dm_topic_reply_to_off:
+                if (
+                    private_dm_topic_send
+                    and i == 0
+                    and reply_to_id is None
+                    and not dm_topic_reply_to_off
+                ):
                     return SendResult(
                         success=False,
                         error=self._dm_topic_missing_anchor_error(),
