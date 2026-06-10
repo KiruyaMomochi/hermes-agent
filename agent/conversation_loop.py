@@ -534,6 +534,11 @@ def run_conversation(
     _should_review_memory = _ctx.should_review_memory
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
+    logger.debug(
+        "Conversation turn external memory prefetch cache len=%d session_id=%s",
+        len(_ext_prefetch_cache or ""),
+        agent.session_id or "-",
+    )
 
     # Main conversation loop counters (pure locals consumed by the loop below).
     api_call_count = 0
@@ -722,6 +727,13 @@ def run_conversation(
             if idx == current_turn_user_idx and msg.get("role") == "user":
                 _ctx_settings = _load_context_control()
                 _injections = []
+                logger.debug(
+                    "Memory context injection check: cache_len=%d enabled=%s position=%s current_turn_idx=%s",
+                    len(_ext_prefetch_cache or ""),
+                    _ctx_settings.enabled,
+                    _ctx_settings.position,
+                    current_turn_user_idx,
+                )
                 if _ext_prefetch_cache and _ctx_settings.enabled:
                     _fenced = build_memory_context_block(_ext_prefetch_cache)
                     if _fenced:

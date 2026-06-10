@@ -3101,8 +3101,10 @@ class AIAgent:
         backend must not block the user from seeing their response.
         """
         if interrupted:
+            logger.debug("External memory sync skipped: turn interrupted")
             return
-        if not (self._memory_manager and final_response and original_user_message):
+        if not self._memory_manager:
+            logger.debug("External memory sync skipped: no memory manager")
             return
         # Multimodal turns carry content as a list of typed parts; providers
         # expect plain strings, so flatten to text first (newline-joined for
@@ -3111,21 +3113,40 @@ class AIAgent:
         response_text = _summarize_user_message_for_log(final_response, sep="\n")
         if not (user_text and response_text):
             return
+
+        sync_kwargs = {"session_id": self.session_id or ""}
+        if messages is not None:
+            sync_kwargs["messages"] = messages
+
+
         try:
-            sync_kwargs = {"session_id": self.session_id or ""}
-            if messages is not None:
-                sync_kwargs["messages"] = messages
+            logger.debug(
+                "External memory sync dispatch: session_id=%s user_len=%d response_len=%d messages=%s",
+                self.session_id or "",
+                len(str(original_user_message)),
+                len(str(final_response)),
+                messages is not None,
+            )
             self._memory_manager.sync_all(
                 user_text,
                 response_text,
                 **sync_kwargs,
             )
+        except Exception as e:
+            logger.warning("External memory sync dispatch failed: %s", e, exc_info=True)
+
+        try:
+            logger.debug(
+                "External memory prefetch dispatch: session_id=%s query_len=%d",
+                self.session_id or "",
+                len(str(original_user_message)),
+            )
             self._memory_manager.queue_prefetch_all(
                 user_text,
                 session_id=self.session_id or "",
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("External memory prefetch dispatch failed: %s", e, exc_info=True)
 
     def release_clients(self) -> None:
         """Release LLM client resources WITHOUT tearing down session tool state.

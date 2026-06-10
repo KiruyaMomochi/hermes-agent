@@ -9,11 +9,13 @@ every interface (CLI, TUI, gateway) kept the agent marked "running" for
 minutes and any follow-up message triggered an aggressive interrupt that
 dropped the message.
 
-The fix dispatches provider work to a single-worker background executor.
-``sync_all`` / ``queue_prefetch_all`` return immediately; the work completes
-(or fails, logged) in the background. ``flush_pending`` provides a barrier
-for session boundaries and deterministic tests. ``shutdown_all`` drains the
-executor with a bounded timeout so a wedged provider can't hang teardown.
+The fix dispatches provider work to background executors. ``sync_all`` /
+``queue_prefetch_all`` return immediately; the work completes (or fails,
+logged) in the background. Sync writes stay serialized on their own lane;
+prefetch uses a separate single-worker lane so it cannot be queued behind a
+slow sync. ``flush_pending`` provides a barrier for session boundaries and
+deterministic tests. ``shutdown_all`` drains the executors with a bounded
+timeout so a wedged provider can't hang teardown.
 """
 import time
 
@@ -90,6 +92,28 @@ def test_background_work_still_completes():
     assert mgr.flush_pending(timeout=10) is True
     assert p.sync_done is True
     assert p.prefetch_done is True
+
+
+def test_prefetch_not_head_of_line_blocked_by_slow_sync():
+    """Prefetch must not wait behind slow sync work on the same executor."""
+
+    class _PrefetchFastProvider(_SlowProvider):
+        _name = "prefetch-fast"
+
+        def queue_prefetch(self, query, *, session_id: str = "") -> None:
+            self.prefetch_done = True
+
+    mgr = MemoryManager()
+    p = _PrefetchFastProvider(delay=2.0)
+    mgr.add_provider(p)
+
+    mgr.sync_all("hi", "hey", session_id="s1")
+    mgr.queue_prefetch_all("hi", session_id="s1")
+
+    time.sleep(0.2)
+    assert p.prefetch_done is True
+    assert p.sync_done is False
+    assert mgr.flush_pending(timeout=10) is True
 
 
 def test_flush_pending_no_executor_is_true():

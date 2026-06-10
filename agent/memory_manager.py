@@ -339,13 +339,16 @@ class MemoryManager:
         self._providers: List[MemoryProvider] = []
         self._tool_to_provider: Dict[str, MemoryProvider] = {}
         self._has_external: bool = False  # True once a non-builtin provider is added
-        # Background executor for end-of-turn sync/prefetch. Lazily created on
-        # first use so the common builtin-only path spawns no extra threads.
-        # A single worker serializes a provider's writes (turn N must land
-        # before turn N+1) and caps thread growth at one per manager. See
-        # _submit_background() and the sync_all/queue_prefetch_all rationale.
+        # Background executor for end-of-turn sync. Lazily created on first
+        # use so the common builtin-only path spawns no extra threads. A
+        # single worker serializes a provider's writes (turn N must land
+        # before turn N+1) and caps sync thread growth at one per manager.
         self._sync_executor: Optional[ThreadPoolExecutor] = None
         self._sync_executor_lock = threading.Lock()
+        # Prefetch gets its own lane so a long sync_all() cannot head-of-line
+        # block queue_prefetch_all() and leave the next turn with empty recall.
+        self._prefetch_executor: Optional[ThreadPoolExecutor] = None
+        self._prefetch_executor_lock = threading.Lock()
 
     # -- Registration --------------------------------------------------------
 
@@ -480,6 +483,11 @@ class MemoryManager:
         for provider in self._providers:
             try:
                 result = provider.prefetch(clean_query, session_id=session_id)
+                logger.debug(
+                    "Memory provider '%s' prefetch returned result_len=%d",
+                    provider.name,
+                    len(result or ""),
+                )
                 if result and result.strip():
                     parts.append(result)
             except Exception as e:
@@ -487,34 +495,54 @@ class MemoryManager:
                     "Memory provider '%s' prefetch failed (non-fatal): %s",
                     provider.name, e,
                 )
-        return "\n\n".join(parts)
+        merged = "\n\n".join(parts)
+        logger.debug(
+            "Memory prefetch_all completed: providers=%d non_empty=%d merged_len=%d session_id=%s query_len=%d",
+            len(self._providers),
+            len(parts),
+            len(merged),
+            session_id,
+            len(str(query)),
+        )
+        return merged
 
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn.
 
-        Provider work is dispatched to a background worker so a slow or
-        wedged provider can never block the caller. See ``sync_all`` for
-        the full rationale (agent stuck "running" minutes after a turn).
+        Provider work is dispatched to a dedicated prefetch worker so a slow
+        or wedged sync write cannot head-of-line block the next turn's recall
+        warmup. See ``sync_all`` for the rationale on keeping provider work
+        off the turn-completion path.
         """
         providers = list(self._providers)
         if not providers:
+            logger.debug("Memory prefetch dispatch skipped: no providers")
             return
+        logger.debug(
+            "Memory prefetch dispatch queued: providers=%s session_id=%s query_len=%d",
+            [provider.name for provider in providers],
+            session_id,
+            len(str(query)),
+        )
 
         clean_query = self._strip_skill_scaffolding(query)
         if not clean_query:
             return
 
         def _run() -> None:
+            logger.debug("Memory prefetch worker started: providers=%d", len(providers))
             for provider in providers:
                 try:
+                    logger.debug("Memory provider '%s' queue_prefetch start", provider.name)
                     provider.queue_prefetch(clean_query, session_id=session_id)
+                    logger.debug("Memory provider '%s' queue_prefetch returned", provider.name)
                 except Exception as e:
                     logger.debug(
                         "Memory provider '%s' queue_prefetch failed (non-fatal): %s",
                         provider.name, e,
                     )
 
-        self._submit_background(_run)
+        self._submit_prefetch_background(_run)
 
     # -- Sync ----------------------------------------------------------------
 
@@ -635,16 +663,61 @@ class MemoryManager:
                     return None
             return self._sync_executor
 
+    def _submit_prefetch_background(self, fn) -> None:
+        """Run ``fn`` on the manager's dedicated prefetch worker."""
+        executor = self._get_prefetch_executor()
+        if executor is None:
+            # Executor unavailable (shut down / creation failed) — run inline
+            # rather than drop the warmup. Slow, but preserves behavior.
+            try:
+                fn()
+            except Exception as e:  # pragma: no cover - fn guards internally
+                logger.debug("Inline memory prefetch task failed: %s", e)
+            return
+        try:
+            executor.submit(fn)
+        except RuntimeError:
+            # Executor was shut down between the get and the submit
+            # (teardown race). Fall back to inline.
+            try:
+                fn()
+            except Exception as e:  # pragma: no cover - fn guards internally
+                logger.debug("Inline memory prefetch task failed: %s", e)
+
+    def _get_prefetch_executor(self) -> Optional[ThreadPoolExecutor]:
+        """Lazily create the single-worker prefetch executor."""
+        if self._prefetch_executor is not None:
+            return self._prefetch_executor
+        with self._prefetch_executor_lock:
+            if self._prefetch_executor is None:
+                try:
+                    self._prefetch_executor = ThreadPoolExecutor(
+                        max_workers=1,
+                        thread_name_prefix="mem-prefetch",
+                    )
+                except Exception as e:  # pragma: no cover - resource exhaustion
+                    logger.warning("Failed to create memory prefetch executor: %s", e)
+                    return None
+            return self._prefetch_executor
+
     def flush_pending(self, timeout: Optional[float] = None) -> bool:
         """Block until queued sync/prefetch work has drained.
 
-        Single-worker executor means submitting a sentinel and waiting on
-        it guarantees every previously-submitted task has run. Returns
-        True if the barrier completed within ``timeout`` (or no executor
-        exists), False on timeout. Used at real session boundaries and by
-        tests that need to assert provider state deterministically.
+        Single-worker executors mean submitting a sentinel and waiting on it
+        guarantees every previously-submitted task in that lane has run.
+        Returns True if both sync and prefetch barriers completed within
+        ``timeout`` (or no executor exists), False on timeout. Used at real
+        session boundaries and by tests that need to assert provider state
+        deterministically.
         """
-        executor = self._sync_executor
+        return self._flush_executor(self._sync_executor, timeout) and self._flush_executor(
+            self._prefetch_executor, timeout
+        )
+
+    @staticmethod
+    def _flush_executor(
+        executor: Optional[ThreadPoolExecutor], timeout: Optional[float]
+    ) -> bool:
         if executor is None:
             return True
         try:
@@ -884,13 +957,14 @@ class MemoryManager:
     def shutdown_all(self) -> None:
         """Shut down all providers (reverse order for clean teardown).
 
-        Drains the background sync/prefetch executor first (bounded by
+        Drains the background sync/prefetch executors first (bounded by
         ``_SYNC_DRAIN_TIMEOUT_S``) so a turn's final sync has a chance to
-        land before providers are torn down. The worker threads are
+        land and queued prefetch can stop before providers are torn down. The
+        worker threads are
         daemon, so anything still wedged past the drain window dies with
         the interpreter rather than blocking exit.
         """
-        self._drain_sync_executor()
+        self._drain_background_executors()
         for provider in reversed(self._providers):
             try:
                 provider.shutdown()
@@ -900,8 +974,24 @@ class MemoryManager:
                     provider.name, e,
                 )
 
-    def _drain_sync_executor(self) -> None:
-        """Shut down the background executor, waiting briefly for drain.
+    def _drain_background_executors(self) -> None:
+        """Shut down background executors, waiting briefly for drain."""
+        with self._sync_executor_lock:
+            sync_executor = self._sync_executor
+            self._sync_executor = None
+        with self._prefetch_executor_lock:
+            prefetch_executor = self._prefetch_executor
+            self._prefetch_executor = None
+        self._drain_executor(sync_executor, "mem-sync-drain", "sync")
+        self._drain_executor(prefetch_executor, "mem-prefetch-drain", "prefetch")
+
+    def _drain_executor(
+        self,
+        executor: Optional[ThreadPoolExecutor],
+        drain_thread_name: str,
+        label: str,
+    ) -> None:
+        """Shut down one background executor, waiting briefly for drain.
 
         Bounded by ``_SYNC_DRAIN_TIMEOUT_S``: a wedged provider must never
         hang process/session teardown. We stop accepting new work and
@@ -909,9 +999,6 @@ class MemoryManager:
         for the currently-running task on a watcher thread. The worker is
         daemon, so an over-running task dies with the interpreter.
         """
-        with self._sync_executor_lock:
-            executor = self._sync_executor
-            self._sync_executor = None
         if executor is None:
             return
         try:
@@ -924,17 +1011,17 @@ class MemoryManager:
             try:
                 executor.shutdown(wait=False)
             except Exception as e:  # pragma: no cover
-                logger.debug("Memory sync executor shutdown failed: %s", e)
+                logger.debug("Memory %s executor shutdown failed: %s", label, e)
             return
         except Exception as e:  # pragma: no cover
-            logger.debug("Memory sync executor shutdown failed: %s", e)
+            logger.debug("Memory %s executor shutdown failed: %s", label, e)
             return
-        # Give an in-flight sync a bounded chance to finish on a watcher
+        # Give an in-flight task a bounded chance to finish on a watcher
         # thread so we don't block the caller past the drain timeout.
         drainer = threading.Thread(
             target=lambda: self._bounded_executor_wait(executor),
             daemon=True,
-            name="mem-sync-drain",
+            name=drain_thread_name,
         )
         drainer.start()
         drainer.join(timeout=_SYNC_DRAIN_TIMEOUT_S)

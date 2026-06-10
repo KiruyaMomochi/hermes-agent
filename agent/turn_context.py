@@ -372,8 +372,13 @@ def build_turn_context(
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
             ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
-        except Exception:
-            pass
+            logger.debug(
+                "External memory prefetch cached for turn: len=%d session_id=%s",
+                len(ext_prefetch_cache),
+                getattr(agent, "session_id", "") or "-",
+            )
+        except Exception as exc:
+            logger.debug("External memory prefetch failed during turn setup: %s", exc)
 
     return TurnContext(
         user_message=user_message,

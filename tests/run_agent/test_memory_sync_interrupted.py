@@ -205,10 +205,10 @@ class TestSyncExternalMemoryForTurn:
 
     # --- Exception safety ----------------------------------------------
 
-    def test_sync_exception_is_swallowed(self):
+    def test_sync_exception_is_swallowed_but_prefetch_still_queues(self):
         """External memory providers are best-effort; a misconfigured
-        or offline backend must not block the user from seeing their
-        response by propagating the exception up."""
+        or offline sync backend must not block the user from seeing their
+        response OR prevent prefetch from warming the next turn."""
         agent = _bare_agent()
         agent._memory_manager.sync_all.side_effect = RuntimeError(
             "backend unreachable"
@@ -220,8 +220,13 @@ class TestSyncExternalMemoryForTurn:
             final_response="hey",
             interrupted=False,
         )
-        # sync_all was attempted.
+        # sync_all was attempted, but its dispatch failure did not suppress
+        # the independent queue_prefetch_all() step.
         agent._memory_manager.sync_all.assert_called_once()
+        agent._memory_manager.queue_prefetch_all.assert_called_once_with(
+            "hi",
+            session_id="test_session_001",
+        )
 
     def test_prefetch_exception_is_swallowed(self):
         """Same best-effort contract applies to the prefetch step — a
