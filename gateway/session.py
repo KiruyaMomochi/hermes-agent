@@ -382,6 +382,13 @@ def build_session_context_prompt(
             "If the user needs a detailed answer, give the short version first "
             "and offer to elaborate."
         )
+    elif context.source.platform == Platform.TELEGRAM:
+        lines.append("")
+        lines.append(
+            "**Platform notes:** You are responding via Telegram. If a reply "
+            "should arrive as multiple chat bubbles, put `---` on its own "
+            "line between bubbles. The delimiter is removed before sending."
+        )
     elif context.source.platform == Platform.YUANBAO:
         lines.append("")
         lines.append(

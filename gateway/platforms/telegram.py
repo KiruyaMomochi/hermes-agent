@@ -12,6 +12,7 @@ import dataclasses
 import inspect
 import json
 import logging
+import math
 import os
 import tempfile
 import html as _html
@@ -107,6 +108,69 @@ _TELEGRAM_IMAGE_EXT_TO_MIME = {
 
 
 MAX_COMMANDS_PER_SCOPE = 30
+
+
+def _coerce_int(value: Any, default: int, *, min_value: int, max_value: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = int(default)
+    return max(min(parsed, max_value), min_value)
+
+
+def _coerce_float(value: Any, default: float, *, min_value: float, max_value: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = float(default)
+    if not math.isfinite(parsed):
+        parsed = float(default)
+    return max(min(parsed, max_value), min_value)
+
+
+def _split_reply_delimited_for_telegram(
+    text: str,
+    *,
+    delimiter: str = "---",
+    max_parts: int = 8,
+) -> list[str]:
+    """Split assistant text on explicit delimiter lines outside code fences."""
+    if not text or max_parts <= 1:
+        return [text]
+    delimiter = str(delimiter or "---").strip()
+    if not delimiter:
+        return [text]
+
+    parts: list[str] = []
+    current: list[str] = []
+    in_code_fence = False
+    saw_delimiter = False
+
+    for line in text.splitlines(keepends=True):
+        line_body = line.rstrip("\r\n")
+        if line_body.lstrip().startswith("```"):
+            in_code_fence = not in_code_fence
+        if not in_code_fence and line_body.strip() == delimiter:
+            saw_delimiter = True
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+            continue
+        current.append(line)
+
+    if not saw_delimiter:
+        return [text]
+
+    tail = "".join(current).strip()
+    if tail:
+        parts.append(tail)
+
+    if not parts:
+        return [text]
+    if len(parts) > max_parts:
+        return parts[: max_parts - 1] + ["\n\n".join(parts[max_parts - 1:])]
+    return parts
 
 
 def check_telegram_requirements() -> bool:
@@ -431,6 +495,17 @@ class TelegramAdapter(BasePlatformAdapter):
         # endpoint) so later sends skip the doomed rich attempt entirely.
         self._rich_send_disabled: bool = False
         self._rich_draft_disabled: bool = False
+        split_cfg = self.config.extra.get("split_replies", {})
+        if not isinstance(split_cfg, dict):
+            split_cfg = {"enabled": split_cfg}
+        self._split_replies_enabled: bool = self._coerce_bool(split_cfg.get("enabled"), False)
+        self._split_replies_delimiter: str = str(split_cfg.get("delimiter") or "---").strip() or "---"
+        self._split_replies_delay_seconds: float = _coerce_float(
+            split_cfg.get("delay_between_ms", 350), 350, min_value=0.0, max_value=5000.0
+        ) / 1000.0
+        self._split_replies_max_parts: int = _coerce_int(
+            split_cfg.get("max_parts", 8), 8, min_value=2, max_value=20
+        )
         # Buffer rapid/album photo updates so Telegram image bursts are handled
         # as a single MessageEvent instead of self-interrupting multiple turns.
         self._media_batch_delay_seconds = float(os.getenv("HERMES_TELEGRAM_MEDIA_BATCH_DELAY_SECONDS", "0.8"))
@@ -903,6 +978,10 @@ class TelegramAdapter(BasePlatformAdapter):
 
     def _coerce_bool_extra(self, key: str, default: bool = False) -> bool:
         value = self.config.extra.get(key) if getattr(self.config, "extra", None) else None
+        return self._coerce_bool(value, default)
+
+    @staticmethod
+    def _coerce_bool(value: Any, default: bool = False) -> bool:
         if value is None:
             return default
         if isinstance(value, str):
@@ -2354,19 +2433,33 @@ class TelegramAdapter(BasePlatformAdapter):
                             pass  # Typing failures are non-fatal
                     return rich_result
 
-            # Format and split message if needed
-            formatted = self.format_message(content)
-            chunks = self.truncate_message(
-                formatted, self.MAX_MESSAGE_LENGTH, len_fn=utf16_len,
+            # Format and split message if needed. Explicit delimiter splitting
+            # is display-only; callers still make one logical send() call, so
+            # DB/session history keeps one unsplit assistant turn.
+            raw_parts = (
+                _split_reply_delimited_for_telegram(
+                    content,
+                    delimiter=getattr(self, "_split_replies_delimiter", "---"),
+                    max_parts=getattr(self, "_split_replies_max_parts", 8),
+                )
+                if getattr(self, "_split_replies_enabled", False)
+                else [content]
             )
-            if len(chunks) > 1:
-                # truncate_message appends a raw " (1/2)" suffix. Escape the
-                # MarkdownV2-special parentheses so Telegram doesn't reject the
-                # chunk and fall back to plain text.
-                chunks = [
-                    re.sub(r" \((\d+)/(\d+)\)$", r" \\(\1/\2\\)", chunk)
-                    for chunk in chunks
-                ]
+            chunks = []
+            for raw_part in raw_parts:
+                formatted = self.format_message(raw_part)
+                part_chunks = self.truncate_message(
+                    formatted, self.MAX_MESSAGE_LENGTH, len_fn=utf16_len,
+                )
+                if len(part_chunks) > 1:
+                    # truncate_message appends a raw " (1/2)" suffix. Escape the
+                    # MarkdownV2-special parentheses so Telegram doesn't reject the
+                    # chunk and fall back to plain text.
+                    part_chunks = [
+                        re.sub(r" \((\d+)/(\d+)\)$", r" \\(\1/\2\\)", chunk)
+                        for chunk in part_chunks
+                    ]
+                chunks.extend(part_chunks)
             
             message_ids = []
             thread_id = self._metadata_thread_id(metadata)
@@ -2568,6 +2661,12 @@ class TelegramAdapter(BasePlatformAdapter):
                                 continue
                         raise
                 message_ids.append(str(msg.message_id))
+                if (
+                    getattr(self, "_split_replies_enabled", False)
+                    and i < len(chunks) - 1
+                    and getattr(self, "_split_replies_delay_seconds", 0.0) > 0
+                ):
+                    await asyncio.sleep(self._split_replies_delay_seconds)
 
             # Re-trigger typing indicator after sending a message.
             # Telegram clears the typing state when a new message is delivered,
