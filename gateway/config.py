@@ -11,6 +11,7 @@ Handles loading and validating configuration for:
 import logging
 import os
 import json
+import math
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable
@@ -44,6 +45,14 @@ def _coerce_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_positive_finite_float(value: Any, default: float, *, minimum: float = 0.0) -> float:
+    """Coerce a positive finite float above ``minimum`` or return default."""
+    parsed = _coerce_float(value, default)
+    if not math.isfinite(parsed) or parsed <= minimum:
+        return default
+    return parsed
 
 
 def _coerce_int(value: Any, default: int) -> int:
@@ -387,6 +396,8 @@ class PlatformConfig:
 DEFAULT_STREAMING_EDIT_INTERVAL: float = 0.8
 DEFAULT_STREAMING_BUFFER_THRESHOLD: int = 24
 DEFAULT_STREAMING_CURSOR: str = " ▉"
+DEFAULT_STREAMING_DRAIN_TIMEOUT_SECONDS: float = 30.0
+DEFAULT_INBOUND_TIMESTAMP_PREFIX_MIN_GAP_SECONDS: float = 60.0
 
 
 @dataclass
@@ -418,9 +429,12 @@ class StreamingConfig:
     # if the original preview has been visible for at least this many
     # seconds, so the platform's visible timestamp reflects completion
     # time instead of the preview creation time.  Currently applied to
-    # Telegram only (other platforms ignore the setting).  Default 0 disables
-    # the fresh-message replacement path; set >0 to opt in.
-    fresh_final_after_seconds: float = 0.0
+    # Telegram only (other platforms ignore the setting).  Default 60s
+    # matches the OpenClaw rollout.  Set to 0 to disable.
+    fresh_final_after_seconds: float = 60.0
+    # Must stay long enough for Telegram split-reply finalization to set
+    # suppression flags; very small values recreate duplicate-send races.
+    drain_timeout_seconds: float = DEFAULT_STREAMING_DRAIN_TIMEOUT_SECONDS
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -430,6 +444,7 @@ class StreamingConfig:
             "buffer_threshold": self.buffer_threshold,
             "cursor": self.cursor,
             "fresh_final_after_seconds": self.fresh_final_after_seconds,
+            "drain_timeout_seconds": self.drain_timeout_seconds,
         }
 
     @classmethod
@@ -449,6 +464,30 @@ class StreamingConfig:
             fresh_final_after_seconds=_coerce_float(
                 data.get("fresh_final_after_seconds"), 0.0
             ),
+            drain_timeout_seconds=_coerce_positive_finite_float(
+                data.get("drain_timeout_seconds"),
+                DEFAULT_STREAMING_DRAIN_TIMEOUT_SECONDS,
+                minimum=1.0,
+            ),
+        )
+
+
+@dataclass
+class InboundTimestampPrefixConfig:
+    min_gap_seconds: float = DEFAULT_INBOUND_TIMESTAMP_PREFIX_MIN_GAP_SECONDS
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"min_gap_seconds": self.min_gap_seconds}
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "InboundTimestampPrefixConfig":
+        if not data:
+            return cls()
+        return cls(
+            min_gap_seconds=_coerce_positive_finite_float(
+                data.get("min_gap_seconds"),
+                DEFAULT_INBOUND_TIMESTAMP_PREFIX_MIN_GAP_SECONDS,
+            )
         )
 
 
@@ -551,6 +590,9 @@ class GatewayConfig:
     # Streaming configuration
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
 
+    # Inbound timestamp prefix formatting
+    inbound_timestamp_prefix: InboundTimestampPrefixConfig = field(default_factory=InboundTimestampPrefixConfig)
+
     # Session store pruning: drop SessionEntry records older than this many
     # days from the in-memory dict and sessions.json.  Keeps the store from
     # growing unbounded in gateways serving many chats/threads/users over
@@ -652,6 +694,7 @@ class GatewayConfig:
             "max_concurrent_sessions": self.max_concurrent_sessions,
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
             "streaming": self.streaming.to_dict(),
+            "inbound_timestamp_prefix": self.inbound_timestamp_prefix.to_dict(),
             "session_store_max_age_days": self.session_store_max_age_days,
         }
     
@@ -735,6 +778,9 @@ class GatewayConfig:
             max_concurrent_sessions=max_concurrent_sessions,
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
+            inbound_timestamp_prefix=InboundTimestampPrefixConfig.from_dict(
+                data.get("inbound_timestamp_prefix", {})
+            ),
             session_store_max_age_days=session_store_max_age_days,
         )
 
@@ -837,6 +883,12 @@ def load_gateway_config() -> GatewayConfig:
                 streaming_cfg = yaml_cfg.get("gateway", {}).get("streaming")
             if isinstance(streaming_cfg, dict):
                 gw_data["streaming"] = streaming_cfg
+
+            inbound_ts_cfg = None
+            if isinstance(gateway_section, dict):
+                inbound_ts_cfg = gateway_section.get("inbound_timestamp_prefix")
+            if isinstance(inbound_ts_cfg, dict):
+                gw_data["inbound_timestamp_prefix"] = inbound_ts_cfg
 
             if "reset_triggers" in yaml_cfg:
                 gw_data["reset_triggers"] = yaml_cfg["reset_triggers"]

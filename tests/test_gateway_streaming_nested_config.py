@@ -41,3 +41,25 @@ class TestStreamingConfigNested:
         })
         assert cfg.streaming.enabled is True
         assert cfg.streaming.transport == "edit"
+
+    def test_drain_timeout_defaults_to_existing_value(self):
+        cfg = _load_with_yaml_dict({})
+        assert cfg.streaming.drain_timeout_seconds == 30.0
+
+    def test_nested_gateway_streaming_drain_timeout(self):
+        cfg = _load_with_yaml_dict({"gateway": {"streaming": {"drain_timeout_seconds": 12.5}}})
+        assert cfg.streaming.drain_timeout_seconds == 12.5
+
+    def test_invalid_streaming_drain_timeout_falls_back(self):
+        cfg = _load_with_yaml_dict({"gateway": {"streaming": {"drain_timeout_seconds": 0.25}}})
+        assert cfg.streaming.drain_timeout_seconds == 30.0
+
+
+class TestInboundTimestampPrefixConfig:
+    def test_min_gap_defaults_to_existing_value(self):
+        cfg = _load_with_yaml_dict({})
+        assert cfg.inbound_timestamp_prefix.min_gap_seconds == 60.0
+
+    def test_nested_gateway_inbound_timestamp_min_gap(self):
+        cfg = _load_with_yaml_dict({"gateway": {"inbound_timestamp_prefix": {"min_gap_seconds": 180.0}}})
+        assert cfg.inbound_timestamp_prefix.min_gap_seconds == 180.0

@@ -352,6 +352,18 @@ class TestGatewayInboundTimestampPrefix:
             "hello", current=current, previous=previous,
         ) == "[15:32] hello"
 
+    def test_custom_min_gap_controls_prefix_threshold(self):
+        from gateway.run import _prepend_inbound_timestamp_prefix
+
+        previous = datetime(2026, 6, 10, 15, 31)
+        current = previous + timedelta(seconds=120)
+        assert _prepend_inbound_timestamp_prefix(
+            "hello", current=current, previous=previous, min_gap_seconds=180.0,
+        ) == "hello"
+        assert _prepend_inbound_timestamp_prefix(
+            "hello", current=current, previous=previous, min_gap_seconds=120.0,
+        ) == "[15:33] hello"
+
     def test_cross_day_prefix_after_one_minute(self):
         from gateway.run import _prepend_inbound_timestamp_prefix
 

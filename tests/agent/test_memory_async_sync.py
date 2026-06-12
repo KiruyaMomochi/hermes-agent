@@ -25,6 +25,30 @@ from agent.memory_provider import MemoryProvider
 from agent.memory_manager import MemoryManager
 
 
+def test_sync_executor_drain_timeout_reads_config(monkeypatch):
+    from agent import memory_manager
+
+    monkeypatch.setattr(
+        memory_manager,
+        "load_config",
+        lambda: {"memory": {"sync_executor_drain_timeout_seconds": 1.25}},
+    )
+
+    assert memory_manager.get_sync_executor_drain_timeout_seconds() == 1.25
+
+
+def test_invalid_sync_executor_drain_timeout_uses_default(monkeypatch):
+    from agent import memory_manager
+
+    monkeypatch.setattr(
+        memory_manager,
+        "load_config",
+        lambda: {"memory": {"sync_executor_drain_timeout_seconds": 0}},
+    )
+
+    assert memory_manager.get_sync_executor_drain_timeout_seconds() == 5.0
+
+
 class _SlowProvider(MemoryProvider):
     """Provider whose sync/prefetch block, simulating a slow backend."""
 

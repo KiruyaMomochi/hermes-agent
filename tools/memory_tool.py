@@ -48,6 +48,54 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_USER_MEMORY_LABEL = "USER PROFILE (who the user is)"
+DEFAULT_AGENT_MEMORY_LABEL = "MEMORY (your personal notes)"
+_memory_labels_cache: Dict[str, str] | None = None
+
+
+def _coerce_memory_label(value: Any, default: str) -> str:
+    """Return a non-empty string label, or ``default`` for invalid values."""
+    if not isinstance(value, str):
+        return default
+    label = value.strip()
+    return label or default
+
+
+def get_memory_labels() -> Dict[str, str]:
+    """Return configured memory section labels from ``memory.labels``.
+
+    Defaults preserve the historical system-prompt headers exactly. Config
+    loading is defensive so a missing or malformed ``config.yaml`` never blocks
+    memory injection.
+    """
+    global _memory_labels_cache
+    if _memory_labels_cache is not None:
+        return _memory_labels_cache
+
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        memory_cfg = cfg.get("memory") if isinstance(cfg, dict) else None
+        labels = memory_cfg.get("labels") if isinstance(memory_cfg, dict) else None
+        if not isinstance(labels, dict):
+            labels = {}
+    except Exception:
+        labels = {}
+
+    _memory_labels_cache = {
+        "user": _coerce_memory_label(labels.get("user"), DEFAULT_USER_MEMORY_LABEL),
+        "agent": _coerce_memory_label(labels.get("agent"), DEFAULT_AGENT_MEMORY_LABEL),
+    }
+    return _memory_labels_cache
+
+
+def _reset_memory_labels_cache() -> None:
+    """Reset cached memory labels — for tests or config hot-reload."""
+    global _memory_labels_cache
+    _memory_labels_cache = None
+
+
 # Where memory files live — resolved dynamically so profile overrides
 # (HERMES_HOME env var changes) are always respected.  The old module-level
 # constant was cached at import time and could go stale if a profile switch
@@ -489,10 +537,9 @@ class MemoryStore:
         current = len(content)
         pct = min(100, int((current / limit) * 100)) if limit > 0 else 0
 
-        if target == "user":
-            header = f"USER PROFILE (who the user is) [{pct}% — {current:,}/{limit:,} chars]"
-        else:
-            header = f"MEMORY (your personal notes) [{pct}% — {current:,}/{limit:,} chars]"
+        labels = get_memory_labels()
+        label = labels["user"] if target == "user" else labels["agent"]
+        header = f"{label} [{pct}% — {current:,}/{limit:,} chars]"
 
         separator = "═" * 46
         return f"{separator}\n{header}\n{separator}\n{content}"

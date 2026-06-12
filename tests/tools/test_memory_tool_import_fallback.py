@@ -4,11 +4,13 @@ import builtins
 import importlib
 import sys
 
+import tools
 from tools.registry import registry
 
 
 def test_memory_tool_imports_without_fcntl(monkeypatch, tmp_path):
     original_import = builtins.__import__
+    original_memory_tool = sys.modules.get("tools.memory_tool")
 
     def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
         if name == "fcntl":
@@ -29,3 +31,7 @@ def test_memory_tool_imports_without_fcntl(monkeypatch, tmp_path):
     assert memory_tool.fcntl is None
     assert registry.get_entry("memory") is not None
     assert result["success"] is True
+
+    if original_memory_tool is not None:
+        sys.modules["tools.memory_tool"] = original_memory_tool
+        setattr(tools, "memory_tool", original_memory_tool)

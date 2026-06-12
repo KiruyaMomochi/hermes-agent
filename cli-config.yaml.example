@@ -504,6 +504,13 @@ memory:
   memory_char_limit: 2200   # ~800 tokens
   user_char_limit: 1375     # ~500 tokens
 
+  # Section labels used when memory is injected into the system prompt.
+  # Customize these if you want different headers while preserving the usage
+  # suffix Hermes appends automatically.
+  labels:
+    user: "USER PROFILE (who the user is)"
+    agent: "MEMORY (your personal notes)"
+
   # Periodic memory nudge: remind the agent to consider saving memories
   # every N user turns. Set to 0 to disable. Only active when memory is enabled.
   nudge_interval: 10        # Nudge every 10 user turns (0 = disabled)

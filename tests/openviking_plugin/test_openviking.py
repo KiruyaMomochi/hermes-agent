@@ -1,10 +1,22 @@
 """Tests for plugins/memory/openviking/__init__.py — URI normalization and payload handling."""
 
 import json
-from typing import Any, cast
+import threading
 
 import plugins.memory.openviking as openviking_plugin
-from plugins.memory.openviking import OpenVikingMemoryProvider
+from plugins.memory.openviking import OpenVikingMemoryProvider, OpenVikingTimeouts
+
+
+class RecordingThread:
+    def __init__(self, alive_after_join=False):
+        self.alive_after_join = alive_after_join
+        self.join_timeouts = []
+
+    def is_alive(self):
+        return True if not self.join_timeouts else self.alive_after_join
+
+    def join(self, timeout=None):
+        self.join_timeouts.append(timeout)
 
 
 def _write_skill(skills_dir, name, body="Do the thing."):
@@ -52,6 +64,67 @@ class RecordingVikingClient:
     def post(self, path, payload=None, **kwargs):
         self.calls.append((path, payload or {}))
         return {"result": {"memories": [], "resources": []}}
+
+
+class TestOpenVikingTimeouts:
+    def test_defaults_match_existing_behavior(self):
+        timeouts = OpenVikingTimeouts.from_config({})
+        assert timeouts.prefetch_join_timeout_seconds == 3.0
+        assert timeouts.sync_join_timeout_seconds == 5.0
+        assert timeouts.session_commit_timeout_seconds == 10.0
+        assert timeouts.shutdown_join_timeout_seconds == 5.0
+        assert timeouts.prefetch_generation_stale_seconds == 30.0
+
+    def test_configured_timeouts_are_used_by_join_paths(self):
+        provider = OpenVikingMemoryProvider()
+        provider._client = object()
+        provider._timeouts = OpenVikingTimeouts.from_config({
+            "prefetch_join_timeout_seconds": 1.25,
+            "sync_join_timeout_seconds": 2.5,
+            "session_commit_timeout_seconds": 3.5,
+            "shutdown_join_timeout_seconds": 4.5,
+            "prefetch_generation_stale_seconds": 6.5,
+        })
+        provider._endpoint = "http://example.invalid"
+        provider._api_key = ""
+        provider._account = "default"
+        provider._user = "default"
+        provider._agent = "hermes"
+        provider._session_id = "s1"
+        prefetch_thread = RecordingThread()
+        provider._prefetch_thread = prefetch_thread
+        provider._prefetch_result = "cached"
+        provider._prefetch_lock = threading.Lock()
+        provider._prefetch_generation = 1
+        sync_thread = RecordingThread()
+        provider._sync_thread = sync_thread
+        provider._turn_count = 0
+
+        assert provider.prefetch("query") == "## OpenViking Context\ncached"
+        provider.sync_turn("user", "assistant")
+        commit_thread = RecordingThread()
+        provider._sync_thread = commit_thread
+        provider.on_session_end([])
+        provider._sync_thread = sync_thread
+        provider.shutdown()
+
+        assert prefetch_thread.join_timeouts == [1.25]
+        assert sync_thread.join_timeouts == [2.5]
+        assert commit_thread.join_timeouts == [3.5]
+
+    def test_invalid_timeouts_fall_back_to_defaults(self):
+        timeouts = OpenVikingTimeouts.from_config({
+            "prefetch_join_timeout_seconds": 0,
+            "sync_join_timeout_seconds": "bad",
+            "session_commit_timeout_seconds": -1,
+            "shutdown_join_timeout_seconds": None,
+            "prefetch_generation_stale_seconds": float("inf"),
+        })
+        assert timeouts.prefetch_join_timeout_seconds == 3.0
+        assert timeouts.sync_join_timeout_seconds == 5.0
+        assert timeouts.session_commit_timeout_seconds == 10.0
+        assert timeouts.shutdown_join_timeout_seconds == 5.0
+        assert timeouts.prefetch_generation_stale_seconds == 30.0
 
 
 class TestOpenVikingSummaryUriNormalization:
@@ -128,7 +201,7 @@ class TestOpenVikingSkillQuerySafety:
         RecordingVikingClient.calls = []
         monkeypatch.setattr(openviking_plugin, "_VikingClient", RecordingVikingClient)
         provider = OpenVikingMemoryProvider()
-        provider._client = cast(Any, object())
+        provider._client = object()
         provider._endpoint = "http://openviking.test"
         provider._api_key = ""
         provider._account = "default"
@@ -144,13 +217,12 @@ class TestOpenVikingSkillQuerySafety:
         )
 
         provider.queue_prefetch(skill_message)
-        assert provider._prefetch_thread is not None
         provider._prefetch_thread.join(timeout=5.0)
 
         assert RecordingVikingClient.calls == [
             (
                 "/api/v1/search/find",
-                {"query": "make a skill for release triage", "limit": 5},
+                {"query": "make a skill for release triage", "top_k": 5},
             )
         ]
 
@@ -158,7 +230,7 @@ class TestOpenVikingSkillQuerySafety:
         RecordingVikingClient.calls = []
         monkeypatch.setattr(openviking_plugin, "_VikingClient", RecordingVikingClient)
         provider = OpenVikingMemoryProvider()
-        provider._client = cast(Any, object())
+        provider._client = object()
         provider._endpoint = "http://openviking.test"
         provider._api_key = ""
         provider._account = "default"
@@ -175,13 +247,12 @@ class TestOpenVikingSkillQuerySafety:
         )
 
         provider.queue_prefetch(skill_message)
-        assert provider._prefetch_thread is not None
         provider._prefetch_thread.join(timeout=5.0)
 
         assert RecordingVikingClient.calls == [
             (
                 "/api/v1/search/find",
-                {"query": "fix the failing retrieval test", "limit": 5},
+                {"query": "fix the failing retrieval test", "top_k": 5},
             )
         ]
 
@@ -189,7 +260,7 @@ class TestOpenVikingSkillQuerySafety:
         RecordingVikingClient.calls = []
         monkeypatch.setattr(openviking_plugin, "_VikingClient", RecordingVikingClient)
         provider = OpenVikingMemoryProvider()
-        provider._client = cast(Any, object())
+        provider._client = object()
         skill_message = (
             '[IMPORTANT: The user has invoked the "skill-creator" skill, indicating they want '
             "you to follow its instructions. The full skill content is loaded below.]\n\n"
@@ -206,7 +277,7 @@ class TestOpenVikingSkillQuerySafety:
         RecordingVikingClient.calls = []
         monkeypatch.setattr(openviking_plugin, "_VikingClient", RecordingVikingClient)
         provider = OpenVikingMemoryProvider()
-        provider._client = cast(Any, object())
+        provider._client = object()
         provider._endpoint = "http://openviking.test"
         provider._api_key = ""
         provider._account = "default"
@@ -223,25 +294,16 @@ class TestOpenVikingSkillQuerySafety:
         )
 
         provider.sync_turn(skill_message, "Done.")
-        assert provider._drain_writers("session-1", timeout=5.0)
+        provider._sync_thread.join(timeout=5.0)
 
         assert RecordingVikingClient.calls == [
             (
-                "/api/v1/sessions/session-1/messages/batch",
-                {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "parts": [
-                                {"type": "text", "text": "make a skill for release triage"},
-                            ],
-                        },
-                        {
-                            "role": "assistant",
-                            "parts": [{"type": "text", "text": "Done."}],
-                        },
-                    ]
-                },
+                "/api/v1/sessions/session-1/messages",
+                {"role": "user", "content": "make a skill for release triage"},
+            ),
+            (
+                "/api/v1/sessions/session-1/messages",
+                {"role": "assistant", "content": "Done."},
             ),
         ]
 
@@ -249,7 +311,7 @@ class TestOpenVikingSkillQuerySafety:
         RecordingVikingClient.calls = []
         monkeypatch.setattr(openviking_plugin, "_VikingClient", RecordingVikingClient)
         provider = OpenVikingMemoryProvider()
-        provider._client = cast(Any, object())
+        provider._client = object()
         skill_message = (
             '[IMPORTANT: The user has invoked the "skill-creator" skill, indicating they want '
             "you to follow its instructions. The full skill content is loaded below.]\n\n"
@@ -259,8 +321,7 @@ class TestOpenVikingSkillQuerySafety:
 
         provider.sync_turn(skill_message, "Done.")
 
-        assert provider._turn_count == 0
-        assert provider._inflight_writers == {}
+        assert provider._sync_thread is None
         assert RecordingVikingClient.calls == []
 
 

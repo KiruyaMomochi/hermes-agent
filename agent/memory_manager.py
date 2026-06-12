@@ -28,15 +28,38 @@ from __future__ import annotations
 import logging
 import re
 import inspect
+import math
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
 from agent.skill_commands import extract_user_instruction_from_skill_message
+from hermes_cli.config import load_config
 from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
+
+
+def _positive_finite_float(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(parsed) or parsed <= 0:
+        return default
+    return parsed
+
+
+def get_sync_executor_drain_timeout_seconds() -> float:
+    cfg = load_config() or {}
+    memory_raw = cfg.get("memory")
+    memory_cfg = memory_raw if isinstance(memory_raw, dict) else {}
+    return _positive_finite_float(
+        memory_cfg.get("sync_executor_drain_timeout_seconds"),
+        _SYNC_DRAIN_TIMEOUT_S,
+    )
+
 
 # How long shutdown_all() waits for in-flight background sync/prefetch work
 # to drain before abandoning it. A wedged provider must never block process
@@ -1024,7 +1047,7 @@ class MemoryManager:
             name=drain_thread_name,
         )
         drainer.start()
-        drainer.join(timeout=_SYNC_DRAIN_TIMEOUT_S)
+        drainer.join(timeout=get_sync_executor_drain_timeout_seconds())
 
     @staticmethod
     def _bounded_executor_wait(executor: ThreadPoolExecutor) -> None:

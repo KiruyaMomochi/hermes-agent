@@ -650,11 +650,13 @@ def _last_user_message_datetime(history: List[Dict[str, Any]]) -> Optional[datet
 def _inbound_timestamp_prefix(
     current: datetime,
     previous: Optional[datetime],
+    *,
+    min_gap_seconds: float = _INBOUND_TIMESTAMP_PREFIX_MIN_GAP_SECS,
 ) -> str:
-    """Return the gateway inbound time prefix for a >=1 minute user gap."""
+    """Return the gateway inbound time prefix after the configured user gap."""
     if previous is None:
         return ""
-    if (current - previous).total_seconds() < _INBOUND_TIMESTAMP_PREFIX_MIN_GAP_SECS:
+    if (current - previous).total_seconds() < min_gap_seconds:
         return ""
     if current.date() == previous.date():
         return current.strftime("[%H:%M]")
@@ -666,11 +668,25 @@ def _prepend_inbound_timestamp_prefix(
     *,
     current: datetime,
     previous: Optional[datetime],
+    min_gap_seconds: float = _INBOUND_TIMESTAMP_PREFIX_MIN_GAP_SECS,
 ) -> str:
-    prefix = _inbound_timestamp_prefix(current, previous)
+    prefix = _inbound_timestamp_prefix(
+        current,
+        previous,
+        min_gap_seconds=min_gap_seconds,
+    )
     if not prefix:
         return message_text
     return f"{prefix} {message_text}"
+
+
+def _stream_consumer_drain_timeout(config: Any) -> float:
+    streaming_cfg = getattr(config, "streaming", None)
+    return getattr(
+        streaming_cfg,
+        "drain_timeout_seconds",
+        _STREAM_CONSUMER_DRAIN_TIMEOUT_SECS,
+    )
 
 
 # Assistant-message fields that must survive transcript replay so multi-turn
@@ -8173,10 +8189,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             session_key,
         )
         previous_user_at = previous_user_at or _last_user_message_datetime(history)
+        timestamp_prefix_cfg = getattr(self.config, "inbound_timestamp_prefix", None)
+        timestamp_min_gap = getattr(
+            timestamp_prefix_cfg,
+            "min_gap_seconds",
+            _INBOUND_TIMESTAMP_PREFIX_MIN_GAP_SECS,
+        )
         message_text = _prepend_inbound_timestamp_prefix(
             message_text,
             current=now,
             previous=previous_user_at,
+            min_gap_seconds=timestamp_min_gap,
         )
         if session_key:
             last_user_by_session = getattr(self, "_last_user_message_at_by_session", None)
@@ -13904,7 +13927,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _stream_consumer.finish()
             if stream_task:
                 try:
-                    await asyncio.wait_for(stream_task, timeout=_STREAM_CONSUMER_DRAIN_TIMEOUT_SECS)
+                    await asyncio.wait_for(stream_task, timeout=_stream_consumer_drain_timeout(self.config))
                 except (asyncio.TimeoutError, asyncio.CancelledError):
                     stream_task.cancel()
 
@@ -16330,7 +16353,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _sc = stream_consumer_holder[0]
                     if _sc and stream_task:
                         try:
-                            await asyncio.wait_for(stream_task, timeout=_STREAM_CONSUMER_DRAIN_TIMEOUT_SECS)
+                            await asyncio.wait_for(stream_task, timeout=_stream_consumer_drain_timeout(self.config))
                         except (asyncio.TimeoutError, asyncio.CancelledError):
                             stream_task.cancel()
                             try:
@@ -16469,7 +16492,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         pass
                 else:
                     try:
-                        await asyncio.wait_for(stream_task, timeout=_STREAM_CONSUMER_DRAIN_TIMEOUT_SECS)
+                        await asyncio.wait_for(stream_task, timeout=_stream_consumer_drain_timeout(self.config))
                     except (asyncio.TimeoutError, asyncio.CancelledError):
                         stream_task.cancel()
                         try:
