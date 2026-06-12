@@ -58,6 +58,9 @@ _SESSION_COMMIT_TIMEOUT = 10.0
 _SHUTDOWN_JOIN_TIMEOUT = 5.0
 _PREFETCH_GENERATION_STALE_TIMEOUT = 30.0
 _REMOTE_RESOURCE_PREFIXES = ("http://", "https://", "git@", "ssh://", "git://")
+_CHATLOG_RE = re.compile(r"\n\d{4}-\d{2}-\d{2}.*?ChatLog:\s*\n")
+_CHUNK_SUFFIX_RE = re.compile(r"#chunk_\d{4}$")
+_MAX_PREFETCH_ABSTRACT_CHARS = 500
 
 
 def _positive_finite_float(value: Any, default: float) -> float:
@@ -807,12 +810,23 @@ class OpenVikingMemoryProvider(MemoryProvider):
         parts = []
         for ctx_type in ("memories", "resources"):
             items = result.get(ctx_type, [])
-            for item in items[:_ctx.max_items]:
+            seen_uris: dict[str, tuple[float, str]] = {}
+            for item in items:
                 uri = item.get("uri", "")
                 abstract = item.get("abstract", "")
                 score = item.get("score", 0)
-                if abstract and score >= _ctx.min_score:
-                    parts.append(f"- [{score:.2f}] {abstract} ({uri})")
+                if not abstract or score < _ctx.min_score:
+                    continue
+                chatlog_match = _CHATLOG_RE.search(abstract)
+                if chatlog_match:
+                    abstract = abstract[:chatlog_match.start()].strip()
+                if len(abstract) > _MAX_PREFETCH_ABSTRACT_CHARS:
+                    abstract = abstract[:_MAX_PREFETCH_ABSTRACT_CHARS] + "..."
+                base_uri = _CHUNK_SUFFIX_RE.sub("", uri)
+                if base_uri not in seen_uris or score > seen_uris[base_uri][0]:
+                    seen_uris[base_uri] = (score, abstract)
+            for base_uri, (score, abstract) in list(seen_uris.items())[:_ctx.max_items]:
+                parts.append(f"- [{score:.2f}] {abstract} ({base_uri})")
         merged = "\n".join(parts)
         logger.debug(
             "OpenViking %s prefetch completed: elapsed_ms=%.1f items=%d result_len=%d",
