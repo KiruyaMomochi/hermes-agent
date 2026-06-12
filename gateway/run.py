@@ -15511,6 +15511,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # content list. Consume-and-clear so subsequent turns on the same
                 # runner instance don't re-attach stale images.
                 _native_imgs = self._consume_pending_native_image_paths(session_key)
+                _persist_user_message_override: Optional[str] = None
                 if _native_imgs:
                     try:
                         from agent.image_routing import build_native_content_parts
@@ -15541,6 +15542,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _parts = _converted
                         if any(p.get("type") in {"image_url", "image"} for p in _parts):
                             _run_message: Any = _parts
+                            # Native image content is API-only. Persist the
+                            # gateway's canonical text for this same inbound
+                            # turn so a Telegram photo+caption does not replay
+                            # later as both the text part from the multimodal
+                            # message and a separate gateway text fallback.
+                            _persist_user_message_override = message
                         else:
                             # All images failed to read — fall back to plain text.
                             _run_message = message
