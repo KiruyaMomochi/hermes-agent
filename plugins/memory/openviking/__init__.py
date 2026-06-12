@@ -7,12 +7,14 @@ automatic memory extraction, and session management.
 Original PR #3369 by Mibayy, rewritten to use the full OpenViking session
 lifecycle instead of read-only search endpoints.
 
-Config via environment variables (profile-scoped via each profile's .env):
+Config via config.yaml under memory.openviking, with environment fallbacks:
   OPENVIKING_ENDPOINT  — Server URL (default: http://127.0.0.1:1933)
   OPENVIKING_API_KEY   — API key (required for authenticated servers)
   OPENVIKING_ACCOUNT   — Tenant account (default: default)
   OPENVIKING_USER      — Tenant user (default: default)
-  OPENVIKING_AGENT   — Tenant agent (default: hermes)
+  OPENVIKING_AGENT     — Tenant agent (default: hermes)
+  user_display_name    — Speaker label for user messages (default: user scope)
+  agent_display_name   — Speaker label for assistant messages (default: agent scope)
 
 Capabilities:
   - Automatic memory extraction on session commit (6 categories)
@@ -68,6 +70,26 @@ def _positive_finite_float(value: Any, default: float) -> float:
     return parsed
 
 
+def _coerce_nonempty_string(value: Any, default: str) -> str:
+    if isinstance(value, str):
+        value = value.strip()
+        if value:
+            return value
+    return default
+
+
+def _load_openviking_config() -> Dict[str, Any]:
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config() or {}
+    except Exception:
+        cfg = {}
+    memory_raw = cfg.get("memory") if isinstance(cfg, dict) else None
+    memory_cfg = memory_raw if isinstance(memory_raw, dict) else {}
+    openviking_raw = memory_cfg.get("openviking")
+    return openviking_raw if isinstance(openviking_raw, dict) else {}
+
+
 @dataclass(frozen=True)
 class OpenVikingTimeouts:
     prefetch_join_timeout_seconds: float = _PREFETCH_JOIN_TIMEOUT
@@ -100,16 +122,7 @@ class OpenVikingTimeouts:
 
 
 def _load_openviking_timeout_config() -> OpenVikingTimeouts:
-    try:
-        from hermes_cli.config import load_config
-        cfg = load_config() or {}
-    except Exception:
-        cfg = {}
-    memory_raw = cfg.get("memory")
-    memory_cfg = memory_raw if isinstance(memory_raw, dict) else {}
-    openviking_raw = memory_cfg.get("openviking")
-    openviking_cfg = openviking_raw if isinstance(openviking_raw, dict) else {}
-    return OpenVikingTimeouts.from_config(openviking_cfg)
+    return OpenVikingTimeouts.from_config(_load_openviking_config())
 
 # Maps the viking_remember `category` enum to a viking:// subdirectory.
 # Keep in sync with REMEMBER_SCHEMA.parameters.properties.category.enum.
@@ -538,6 +551,11 @@ class OpenVikingMemoryProvider(MemoryProvider):
         self._client: Optional[_VikingClient] = None
         self._endpoint = ""
         self._api_key = ""
+        self._account = "default"
+        self._user = "default"
+        self._agent = "hermes"
+        self._user_display_name = "default"
+        self._agent_display_name = "hermes"
         self._session_id = ""
         self._turn_count = 0
         self._sync_thread: Optional[threading.Thread] = None
@@ -554,7 +572,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         """Check if OpenViking endpoint is configured. No network calls."""
-        return bool(os.environ.get("OPENVIKING_ENDPOINT"))
+        return bool(_load_openviking_config().get("endpoint") or os.environ.get("OPENVIKING_ENDPOINT"))
 
     def get_config_schema(self):
         return [
@@ -563,7 +581,6 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 "description": "OpenViking server URL",
                 "required": True,
                 "default": _DEFAULT_ENDPOINT,
-                "env_var": "OPENVIKING_ENDPOINT",
             },
             {
                 "key": "api_key",
@@ -575,29 +592,79 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 "key": "account",
                 "description": "OpenViking tenant account ID ([default], used when local mode, OPENVIKING_API_KEY is empty)",
                 "default": "default",
-                "env_var": "OPENVIKING_ACCOUNT",
             },
             {
                 "key": "user",
                 "description": "OpenViking user ID within the account ([default], used when local mode, OPENVIKING_API_KEY is empty)",
                 "default": "default",
-                "env_var": "OPENVIKING_USER",
             },
             {
                 "key": "agent",
                 "description": "OpenViking agent ID within the account ([hermes], useful in multi-agent mode)",
                 "default": "hermes",
-                "env_var": "OPENVIKING_AGENT",
+            },
+            {
+                "key": "user_display_name",
+                "description": "Speaker label for user messages sent to OpenViking ([user ID], e.g. kyaru)",
+                "default_from": {"field": "user", "map": {}},
+            },
+            {
+                "key": "agent_display_name",
+                "description": "Speaker label for assistant messages sent to OpenViking ([agent ID], e.g. yozakura)",
+                "default_from": {"field": "agent", "map": {}},
             },
         ]
 
+    def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
+        """Persist OpenViking non-secret settings under ``memory.openviking``."""
+        try:
+            from hermes_cli.config import load_config, save_config
+        except Exception as exc:
+            raise RuntimeError(f"config module unavailable: {exc}") from exc
+
+        config = load_config() or {}
+        memory_cfg = config.setdefault("memory", {})
+        if not isinstance(memory_cfg, dict):
+            memory_cfg = {}
+            config["memory"] = memory_cfg
+        provider_cfg = memory_cfg.setdefault("openviking", {})
+        if not isinstance(provider_cfg, dict):
+            provider_cfg = {}
+            memory_cfg["openviking"] = provider_cfg
+
+        for key, value in values.items():
+            if key == "api_key":
+                continue
+            if isinstance(value, str):
+                value = value.strip()
+            if value:
+                provider_cfg[key] = value
+        save_config(config)
+
     def initialize(self, session_id: str, **kwargs) -> None:
-        self._endpoint = os.environ.get("OPENVIKING_ENDPOINT", _DEFAULT_ENDPOINT)
-        self._api_key = os.environ.get("OPENVIKING_API_KEY", "")
-        self._account = os.environ.get("OPENVIKING_ACCOUNT", "default")
-        self._user = os.environ.get("OPENVIKING_USER", "default")
-        self._agent = os.environ.get("OPENVIKING_AGENT", "hermes")
-        self._timeouts = _load_openviking_timeout_config()
+        openviking_cfg = _load_openviking_config()
+        self._endpoint = _coerce_nonempty_string(
+            openviking_cfg.get("endpoint"), os.environ.get("OPENVIKING_ENDPOINT", _DEFAULT_ENDPOINT)
+        )
+        self._api_key = _coerce_nonempty_string(
+            openviking_cfg.get("api_key"), os.environ.get("OPENVIKING_API_KEY", "")
+        )
+        self._account = _coerce_nonempty_string(
+            openviking_cfg.get("account"), os.environ.get("OPENVIKING_ACCOUNT", "default")
+        )
+        self._user = _coerce_nonempty_string(
+            openviking_cfg.get("user"), os.environ.get("OPENVIKING_USER", "default")
+        )
+        self._agent = _coerce_nonempty_string(
+            openviking_cfg.get("agent"), os.environ.get("OPENVIKING_AGENT", "hermes")
+        )
+        self._user_display_name = _coerce_nonempty_string(
+            openviking_cfg.get("user_display_name"), self._user
+        )
+        self._agent_display_name = _coerce_nonempty_string(
+            openviking_cfg.get("agent_display_name"), self._agent
+        )
+        self._timeouts = OpenVikingTimeouts.from_config(openviking_cfg)
         self._session_id = session_id
         self._turn_count = 0
 
@@ -829,12 +896,16 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 if user_text:
                     client.post(f"/api/v1/sessions/{sid}/messages", {
                         "role": "user",
+                        "peer_id": self._user_display_name,
+                        "role_id": self._user_display_name,
                         "content": user_text[:4000],  # trim very long messages
                     })
                 # Add assistant message
                 if assistant_text:
                     client.post(f"/api/v1/sessions/{sid}/messages", {
                         "role": "assistant",
+                        "peer_id": self._agent_display_name,
+                        "role_id": self._agent_display_name,
                         "content": assistant_text[:4000],
                     })
             except Exception as e:
