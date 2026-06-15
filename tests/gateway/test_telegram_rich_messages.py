@@ -573,6 +573,72 @@ async def test_rich_draft_oversized_uses_legacy():
     adapter._bot.send_message_draft.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_split_replies_attempt_rich_per_part_before_legacy_path():
+    adapter = _make_adapter(
+        extra={
+            "split_replies": True,
+            "split_replies_delimiter": "---",
+            "split_replies_delay_seconds": 0,
+        }
+    )
+    adapter._bot.do_api_request = AsyncMock(
+        side_effect=[
+            SimpleNamespace(message_id=101),
+            SimpleNamespace(message_id=102),
+        ]
+    )
+
+    result = await adapter.send("12345", "## First\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n---\n\n## Second", reply_to="999")
+
+    assert result.success is True
+    assert result.message_id == "101"
+    assert result.raw_response["message_ids"] == ["101", "102"]
+    assert adapter._bot.do_api_request.await_count == 2
+    adapter._bot.send_message.assert_not_called()
+    first_call, second_call = adapter._bot.do_api_request.await_args_list
+    assert first_call.args[0] == "sendRichMessage"
+    assert second_call.args[0] == "sendRichMessage"
+    first_payload = first_call.kwargs["api_kwargs"]
+    second_payload = second_call.kwargs["api_kwargs"]
+    assert first_payload["rich_message"]["markdown"].startswith("## First")
+    assert "---\n\n## Second" not in first_payload["rich_message"]["markdown"]
+    assert second_payload["rich_message"]["markdown"] == "## Second"
+    assert first_payload["reply_parameters"] == {"message_id": 999}
+    assert "reply_parameters" not in second_payload
+
+
+@pytest.mark.asyncio
+async def test_split_replies_falls_back_to_legacy_per_part_when_rich_rejected():
+    adapter = _make_adapter(
+        extra={
+            "split_replies": True,
+            "split_replies_delimiter": "---",
+            "split_replies_delay_seconds": 0,
+        }
+    )
+    adapter._bot.do_api_request = AsyncMock(
+        side_effect=[
+            BadRequest("can't parse first rich part"),
+            SimpleNamespace(message_id=202),
+        ]
+    )
+    adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=201))
+
+    result = await adapter.send("12345", "**legacy fallback**\n\n---\n\n## Rich second", reply_to="999")
+
+    assert result.success is True
+    assert result.message_id == "201"
+    assert result.raw_response["message_ids"] == ["201", "202"]
+    assert adapter._bot.do_api_request.await_count == 2
+    adapter._bot.send_message.assert_awaited_once()
+    legacy_call = adapter._bot.send_message.await_args
+    assert legacy_call.kwargs["reply_to_message_id"] == 999
+    second_payload = adapter._bot.do_api_request.await_args_list[1].kwargs["api_kwargs"]
+    assert second_payload["rich_message"]["markdown"] == "## Rich second"
+    assert "reply_parameters" not in second_payload
+
+
 # ----------------------------------------------------------------------
 # prefers_fresh_final_streaming: Telegram keeps streamed finals on the edit
 # path, even when rich messages are enabled, so users do not briefly see two

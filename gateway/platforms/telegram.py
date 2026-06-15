@@ -1200,8 +1200,9 @@ class TelegramAdapter(BasePlatformAdapter):
         reply_to: Optional[str],
         metadata: Optional[Dict[str, Any]],
         thread_id: Optional[str],
+        chunk_index: int = 0,
     ) -> Optional[tuple]:
-        """Routing for a single (rich) send — mirrors send()'s index-0 block.
+        """Routing for one send chunk — mirrors send()'s per-chunk block.
 
         Returns ``(reply_to_id, thread_kwargs)``, or ``None`` to signal "skip
         rich, let the legacy path handle it" — used for the DM-topic fail-loud
@@ -1219,12 +1220,14 @@ class TelegramAdapter(BasePlatformAdapter):
             if private_dm_topic_send and metadata_reply_to is not None
             else None
         )
-        if private_dm_topic_send:
-            should_thread = reply_to_source is not None and self._reply_to_mode != "off"
-        else:
-            should_thread = self._should_thread_reply(reply_to_source, 0)
+        should_thread = self._should_thread_reply(reply_to_source, chunk_index)
         reply_to_id = int(reply_to_source) if should_thread and reply_to_source else None
-        if private_dm_topic_send and reply_to_id is None and not dm_topic_reply_to_off:
+        if (
+            private_dm_topic_send
+            and chunk_index == 0
+            and reply_to_id is None
+            and not dm_topic_reply_to_off
+        ):
             # Refusing to send outside the requested DM topic — defer to the
             # legacy path, which returns the canonical fail-loud SendResult.
             return None
@@ -1243,6 +1246,8 @@ class TelegramAdapter(BasePlatformAdapter):
         content: str,
         reply_to: Optional[str],
         metadata: Optional[Dict[str, Any]],
+        *,
+        chunk_index: int = 0,
     ) -> Optional[SendResult]:
         """Attempt a single ``sendRichMessage`` send.
 
@@ -1251,7 +1256,9 @@ class TelegramAdapter(BasePlatformAdapter):
         legacy MarkdownV2 path" (permanent/capability error or DM-topic skip).
         """
         thread_id = self._metadata_thread_id(metadata)
-        routing = self._compute_single_send_routing(chat_id, reply_to, metadata, thread_id)
+        routing = self._compute_single_send_routing(
+            chat_id, reply_to, metadata, thread_id, chunk_index
+        )
         if routing is None:
             return None
         reply_to_id, thread_kwargs = routing
@@ -2417,25 +2424,10 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=None)
         
         try:
-            # Bot API 10.1 rich fast-path: send the raw agent markdown via
-            # sendRichMessage so tables/task lists/etc. render natively. Falls
-            # through to the legacy MarkdownV2 path on permanent/capability
-            # errors or DM-topic routing skips; returns directly on success or
-            # on a transient failure (which must NOT be legacy-resent).
-            if self._should_attempt_rich(content, metadata=metadata):
-                rich_result = await self._try_send_rich(chat_id, content, reply_to, metadata)
-                if rich_result is not None:
-                    if rich_result.success:
-                        # Re-trigger typing like the legacy success path does.
-                        try:
-                            await self.send_typing(chat_id, metadata=metadata)
-                        except Exception:
-                            pass  # Typing failures are non-fatal
-                    return rich_result
-
-            # Format and split message if needed. Explicit delimiter splitting
-            # is display-only; callers still make one logical send() call, so
-            # DB/session history keeps one unsplit assistant turn.
+            # Split display-only reply delimiters before any rich send attempt.
+            # Each resulting chat bubble gets its own rich send attempt so a
+            # delimiter such as "---" produces multiple Telegram messages
+            # instead of being rendered as a rich-message horizontal rule.
             raw_parts = (
                 _split_reply_delimited_for_telegram(
                     content,
@@ -2445,7 +2437,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 if getattr(self, "_split_replies_enabled", False)
                 else [content]
             )
-            chunks = []
+            legacy_parts = []
             for raw_part in raw_parts:
                 formatted = self.format_message(raw_part)
                 part_chunks = self.truncate_message(
@@ -2459,7 +2451,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         re.sub(r" \((\d+)/(\d+)\)$", r" \\(\1/\2\\)", chunk)
                         for chunk in part_chunks
                     ]
-                chunks.extend(part_chunks)
+                legacy_parts.append((raw_part, part_chunks))
             
             message_ids = []
             thread_id = self._metadata_thread_id(metadata)
@@ -2481,191 +2473,222 @@ class TelegramAdapter(BasePlatformAdapter):
             except (ImportError, AttributeError):
                 _TimedOut = None  # type: ignore[assignment,misc]
 
-            for i, chunk in enumerate(chunks):
-                retried_thread_not_found = False
-                metadata_reply_to = self._metadata_reply_to_message_id(metadata)
-                private_dm_topic_send = self._is_private_dm_topic_send(chat_id, thread_id, metadata)
-                # reply_to_mode="off" on the existing telegram_dm_topic_reply_fallback path
-                # is an explicit user opt-in to "message_thread_id alone is enough" (PR #23994
-                # / commit 21a15b671). Honor it — don't fail loud just because the anchor was
-                # suppressed by config. The new fail-loud contract only applies when the caller
-                # didn't ask for the anchor to be dropped.
-                dm_topic_reply_to_off = (
-                    private_dm_topic_send
-                    and self._reply_to_mode == "off"
-                    and bool(metadata and metadata.get("telegram_dm_topic_reply_fallback"))
-                )
-                reply_to_source = reply_to or (
-                    str(metadata_reply_to) if private_dm_topic_send and metadata_reply_to is not None else None
-                )
-                should_thread = self._should_thread_reply(reply_to_source, i)
-                reply_to_id = int(reply_to_source) if should_thread and reply_to_source else None
-                if (
-                    private_dm_topic_send
-                    and i == 0
-                    and reply_to_id is None
-                    and not dm_topic_reply_to_off
-                ):
-                    return SendResult(
-                        success=False,
-                        error=self._dm_topic_missing_anchor_error(),
-                        retryable=False,
+            for part_index, (raw_part, part_chunks) in enumerate(legacy_parts):
+                chunk_index = len(message_ids)
+                # Bot API 10.1 rich path: send the raw agent markdown via
+                # sendRichMessage so tables/task lists/etc. render natively.
+                # Permanent/capability errors fall through to the legacy
+                # MarkdownV2 path for this part only; transient failures return
+                # directly because the rich request may have reached Telegram.
+                if self._should_attempt_rich(raw_part, metadata=metadata):
+                    rich_result = await self._try_send_rich(
+                        chat_id,
+                        raw_part,
+                        reply_to,
+                        metadata,
+                        chunk_index=chunk_index,
                     )
-                thread_kwargs = self._thread_kwargs_for_send(
-                    chat_id,
-                    thread_id,
-                    metadata,
-                    reply_to_message_id=reply_to_id,
-                    reply_to_mode=self._reply_to_mode,
-                )
-                if used_thread_fallback and thread_kwargs.get("message_thread_id") is not None:
-                    thread_kwargs = dict(thread_kwargs)
-                    thread_kwargs["message_thread_id"] = None
-                effective_thread_id = thread_kwargs.get("message_thread_id")
+                    if rich_result is not None:
+                        if rich_result.success:
+                            message_ids.append(rich_result.message_id)
+                            if (
+                                getattr(self, "_split_replies_enabled", False)
+                                and part_index < len(legacy_parts) - 1
+                                and getattr(self, "_split_replies_delay_seconds", 0.0) > 0
+                            ):
+                                await asyncio.sleep(self._split_replies_delay_seconds)
+                            continue
+                        return rich_result
 
-                msg = None
-                for _send_attempt in range(3):
-                    try:
-                        # Try Markdown first, fall back to plain text if it fails
+                for chunk_index_within_part, chunk in enumerate(part_chunks):
+                    i = len(message_ids)
+                    retried_thread_not_found = False
+                    metadata_reply_to = self._metadata_reply_to_message_id(metadata)
+                    private_dm_topic_send = self._is_private_dm_topic_send(chat_id, thread_id, metadata)
+                    # reply_to_mode="off" on the existing telegram_dm_topic_reply_fallback path
+                    # is an explicit user opt-in to "message_thread_id alone is enough" (PR #23994
+                    # / commit 21a15b671). Honor it — don't fail loud just because the anchor was
+                    # suppressed by config. The new fail-loud contract only applies when the caller
+                    # didn't ask for the anchor to be dropped.
+                    dm_topic_reply_to_off = (
+                        private_dm_topic_send
+                        and self._reply_to_mode == "off"
+                        and bool(metadata and metadata.get("telegram_dm_topic_reply_fallback"))
+                    )
+                    reply_to_source = reply_to or (
+                        str(metadata_reply_to) if private_dm_topic_send and metadata_reply_to is not None else None
+                    )
+                    should_thread = self._should_thread_reply(reply_to_source, i)
+                    reply_to_id = int(reply_to_source) if should_thread and reply_to_source else None
+                    if (
+                        private_dm_topic_send
+                        and i == 0
+                        and reply_to_id is None
+                        and not dm_topic_reply_to_off
+                    ):
+                        return SendResult(
+                            success=False,
+                            error=self._dm_topic_missing_anchor_error(),
+                            retryable=False,
+                        )
+                    thread_kwargs = self._thread_kwargs_for_send(
+                        chat_id,
+                        thread_id,
+                        metadata,
+                        reply_to_message_id=reply_to_id,
+                        reply_to_mode=self._reply_to_mode,
+                    )
+                    if used_thread_fallback and thread_kwargs.get("message_thread_id") is not None:
+                        thread_kwargs = dict(thread_kwargs)
+                        thread_kwargs["message_thread_id"] = None
+                    effective_thread_id = thread_kwargs.get("message_thread_id")
+
+                    msg = None
+                    for _send_attempt in range(3):
                         try:
-                            msg = await self._bot.send_message(
-                                chat_id=int(chat_id),
-                                text=chunk,
-                                parse_mode=ParseMode.MARKDOWN_V2,
-                                reply_to_message_id=reply_to_id,
-                                **thread_kwargs,
-                                **self._link_preview_kwargs(),
-                                **self._notification_kwargs(metadata),
-                            )
-                        except Exception as md_error:
-                            # Markdown parsing failed, try plain text
-                            if "parse" in str(md_error).lower() or "markdown" in str(md_error).lower():
-                                logger.warning("[%s] MarkdownV2 parse failed, falling back to plain text: %s", self.name, md_error)
-                                plain_chunk = _strip_mdv2(chunk)
+                            # Try Markdown first, fall back to plain text if it fails
+                            try:
                                 msg = await self._bot.send_message(
                                     chat_id=int(chat_id),
-                                    text=plain_chunk,
-                                    parse_mode=None,
+                                    text=chunk,
+                                    parse_mode=ParseMode.MARKDOWN_V2,
                                     reply_to_message_id=reply_to_id,
                                     **thread_kwargs,
                                     **self._link_preview_kwargs(),
                                     **self._notification_kwargs(metadata),
                                 )
-                            else:
-                                raise
-                        break  # success
-                    except _NetErr as send_err:
-                        # BadRequest is a subclass of NetworkError in
-                        # python-telegram-bot but represents permanent errors
-                        # (not transient network issues). Detect and handle
-                        # specific cases instead of blindly retrying.
-                        if _BadReq and isinstance(send_err, _BadReq):
-                            if self._is_thread_not_found_error(send_err) and effective_thread_id is not None:
-                                if private_dm_topic_send or (metadata and metadata.get("telegram_dm_topic_created_for_send")):
-                                    return SendResult(
-                                        success=False,
-                                        error=str(send_err),
-                                        retryable=False,
+                            except Exception as md_error:
+                                # Markdown parsing failed, try plain text
+                                if "parse" in str(md_error).lower() or "markdown" in str(md_error).lower():
+                                    logger.warning("[%s] MarkdownV2 parse failed, falling back to plain text: %s", self.name, md_error)
+                                    plain_chunk = _strip_mdv2(chunk)
+                                    msg = await self._bot.send_message(
+                                        chat_id=int(chat_id),
+                                        text=plain_chunk,
+                                        parse_mode=None,
+                                        reply_to_message_id=reply_to_id,
+                                        **thread_kwargs,
+                                        **self._link_preview_kwargs(),
+                                        **self._notification_kwargs(metadata),
                                     )
-                                # Telegram has been observed to return a
-                                # one-off "thread not found" that recovers on
-                                # an immediate retry (transient flake — see
-                                # test_send_retries_transient_thread_not_found_before_fallback).
-                                # Try the same thread_id once without sleeping
-                                # before falling back to a plain send.
-                                if not retried_thread_not_found:
-                                    retried_thread_not_found = True
+                                else:
+                                    raise
+                            break  # success
+                        except _NetErr as send_err:
+                            # BadRequest is a subclass of NetworkError in
+                            # python-telegram-bot but represents permanent errors
+                            # (not transient network issues). Detect and handle
+                            # specific cases instead of blindly retrying.
+                            if _BadReq and isinstance(send_err, _BadReq):
+                                if self._is_thread_not_found_error(send_err) and effective_thread_id is not None:
+                                    if private_dm_topic_send or (metadata and metadata.get("telegram_dm_topic_created_for_send")):
+                                        return SendResult(
+                                            success=False,
+                                            error=str(send_err),
+                                            retryable=False,
+                                        )
+                                    # Telegram has been observed to return a
+                                    # one-off "thread not found" that recovers on
+                                    # an immediate retry (transient flake — see
+                                    # test_send_retries_transient_thread_not_found_before_fallback).
+                                    # Try the same thread_id once without sleeping
+                                    # before falling back to a plain send.
+                                    if not retried_thread_not_found:
+                                        retried_thread_not_found = True
+                                        logger.warning(
+                                            "[%s] Thread %s not found, retrying once with same thread_id",
+                                            self.name, effective_thread_id,
+                                        )
+                                        continue
+                                    # Second failure: the thread is genuinely gone.
+                                    # Retry without ``message_thread_id`` so the
+                                    # message still reaches the chat.
                                     logger.warning(
-                                        "[%s] Thread %s not found, retrying once with same thread_id",
+                                        "[%s] Thread %s not found, retrying without message_thread_id",
                                         self.name, effective_thread_id,
                                     )
-                                    continue
-                                # Second failure: the thread is genuinely gone.
-                                # Retry without ``message_thread_id`` so the
-                                # message still reaches the chat.
-                                logger.warning(
-                                    "[%s] Thread %s not found, retrying without message_thread_id",
-                                    self.name, effective_thread_id,
-                                )
-                                used_thread_fallback = True
-                                effective_thread_id = None
-                                thread_kwargs = {"message_thread_id": None}
-                                continue
-                            err_lower = str(send_err).lower()
-                            if "message to be replied not found" in err_lower and reply_to_id is not None:
-                                if private_dm_topic_send:
-                                    return SendResult(
-                                        success=False,
-                                        error=str(send_err),
-                                        retryable=False,
-                                    )
-                                # Original message was deleted before we
-                                # could reply. For private-topic fallback
-                                # sends, message_thread_id is only valid with
-                                # the reply anchor, so drop both together.
-                                logger.warning(
-                                    "[%s] Reply target deleted, retrying without reply_to: %s",
-                                    self.name, send_err,
-                                )
-                                reply_to_id = None
-                                if metadata and metadata.get("telegram_dm_topic_reply_fallback"):
-                                    thread_kwargs = {}
+                                    used_thread_fallback = True
                                     effective_thread_id = None
-                                else:
-                                    thread_kwargs = self._thread_kwargs_for_send(
-                                        chat_id,
-                                        thread_id,
-                                        metadata,
-                                        reply_to_message_id=reply_to_id,
-                                        reply_to_mode=self._reply_to_mode,
+                                    thread_kwargs = {"message_thread_id": None}
+                                    continue
+                                err_lower = str(send_err).lower()
+                                if "message to be replied not found" in err_lower and reply_to_id is not None:
+                                    if private_dm_topic_send:
+                                        return SendResult(
+                                            success=False,
+                                            error=str(send_err),
+                                            retryable=False,
+                                        )
+                                    # Original message was deleted before we
+                                    # could reply. For private-topic fallback
+                                    # sends, message_thread_id is only valid with
+                                    # the reply anchor, so drop both together.
+                                    logger.warning(
+                                        "[%s] Reply target deleted, retrying without reply_to: %s",
+                                        self.name, send_err,
                                     )
-                                    effective_thread_id = thread_kwargs.get("message_thread_id")
-                                continue
-                            # Other BadRequest errors are permanent — don't retry
-                            raise
-                        # TimedOut is also a subclass of NetworkError. A
-                        # generic timeout may have reached Telegram, so don't
-                        # retry; a wrapped ConnectTimeout means no connection
-                        # was established, so retrying is safe. A pool timeout
-                        # (httpx pool exhausted) is explicitly "not sent to
-                        # Telegram" -- retrying through the loop is safe and
-                        # prevents silent drops when the pool frees up.
-                        if (
-                            _TimedOut
-                            and isinstance(send_err, _TimedOut)
-                            and not self._looks_like_connect_timeout(send_err)
-                            and not self._looks_like_pool_timeout(send_err)
-                        ):
-                            raise
-                        if _send_attempt < 2:
-                            wait = 2 ** _send_attempt
-                            logger.warning("[%s] Network error on send (attempt %d/3), retrying in %ds: %s",
-                                           self.name, _send_attempt + 1, wait, send_err)
-                            await asyncio.sleep(wait)
-                        else:
-                            raise
-                    except Exception as send_err:
-                        retry_after = getattr(send_err, "retry_after", None)
-                        if retry_after is not None or "retry after" in str(send_err).lower():
+                                    reply_to_id = None
+                                    if metadata and metadata.get("telegram_dm_topic_reply_fallback"):
+                                        thread_kwargs = {}
+                                        effective_thread_id = None
+                                    else:
+                                        thread_kwargs = self._thread_kwargs_for_send(
+                                            chat_id,
+                                            thread_id,
+                                            metadata,
+                                            reply_to_message_id=reply_to_id,
+                                            reply_to_mode=self._reply_to_mode,
+                                        )
+                                        effective_thread_id = thread_kwargs.get("message_thread_id")
+                                    continue
+                                # Other BadRequest errors are permanent — don't retry
+                                raise
+                            # TimedOut is also a subclass of NetworkError. A
+                            # generic timeout may have reached Telegram, so don't
+                            # retry; a wrapped ConnectTimeout means no connection
+                            # was established, so retrying is safe. A pool timeout
+                            # (httpx pool exhausted) is explicitly "not sent to
+                            # Telegram" -- retrying through the loop is safe and
+                            # prevents silent drops when the pool frees up.
+                            if (
+                                _TimedOut
+                                and isinstance(send_err, _TimedOut)
+                                and not self._looks_like_connect_timeout(send_err)
+                                and not self._looks_like_pool_timeout(send_err)
+                            ):
+                                raise
                             if _send_attempt < 2:
-                                wait = float(retry_after) if retry_after is not None else 1.0
-                                logger.warning(
-                                    "[%s] Telegram flood control on send (attempt %d/3), retrying in %.1fs: %s",
-                                    self.name,
-                                    _send_attempt + 1,
-                                    wait,
-                                    send_err,
-                                )
+                                wait = 2 ** _send_attempt
+                                logger.warning("[%s] Network error on send (attempt %d/3), retrying in %ds: %s",
+                                               self.name, _send_attempt + 1, wait, send_err)
                                 await asyncio.sleep(wait)
-                                continue
-                        raise
-                message_ids.append(str(msg.message_id))
-                if (
-                    getattr(self, "_split_replies_enabled", False)
-                    and i < len(chunks) - 1
-                    and getattr(self, "_split_replies_delay_seconds", 0.0) > 0
-                ):
-                    await asyncio.sleep(self._split_replies_delay_seconds)
+                            else:
+                                raise
+                        except Exception as send_err:
+                            retry_after = getattr(send_err, "retry_after", None)
+                            if retry_after is not None or "retry after" in str(send_err).lower():
+                                if _send_attempt < 2:
+                                    wait = float(retry_after) if retry_after is not None else 1.0
+                                    logger.warning(
+                                        "[%s] Telegram flood control on send (attempt %d/3), retrying in %.1fs: %s",
+                                        self.name,
+                                        _send_attempt + 1,
+                                        wait,
+                                        send_err,
+                                    )
+                                    await asyncio.sleep(wait)
+                                    continue
+                            raise
+                    message_ids.append(str(msg.message_id))
+                    if (
+                        getattr(self, "_split_replies_enabled", False)
+                        and (
+                            part_index < len(legacy_parts) - 1
+                            or chunk_index_within_part < len(part_chunks) - 1
+                        )
+                        and getattr(self, "_split_replies_delay_seconds", 0.0) > 0
+                    ):
+                        await asyncio.sleep(self._split_replies_delay_seconds)
 
             # Re-trigger typing indicator after sending a message.
             # Telegram clears the typing state when a new message is delivered,
@@ -2686,7 +2709,6 @@ class TelegramAdapter(BasePlatformAdapter):
                     "thread_fallback": used_thread_fallback,
                 },
             )
-            
         except Exception as e:
             logger.error("[%s] Failed to send Telegram message: %s", self.name, e, exc_info=True)
             err_str = str(e).lower()
