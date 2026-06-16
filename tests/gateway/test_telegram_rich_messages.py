@@ -17,7 +17,7 @@ import pytest
 
 from gateway.config import PlatformConfig
 from gateway.platforms.base import SendResult
-from gateway.platforms.telegram import TelegramAdapter
+from gateway.platforms.telegram import TelegramAdapter, _split_reply_delimited_for_telegram
 from telegram.error import BadRequest, NetworkError, TimedOut
 
 
@@ -48,10 +48,20 @@ PTB_INVALID_TOKEN_404 = InvalidToken(
 
 def _make_adapter(extra=None):
     """Build a TelegramAdapter with a mock bot wired for the rich path."""
+    merged_extra = {"rich_messages": True, **(extra or {})}
+    split_replies = merged_extra.pop("split_replies", None)
+    if split_replies is not None:
+        merged_extra["split_replies"] = {
+            "enabled": split_replies,
+            "delimiter": merged_extra.pop("split_replies_delimiter", "---"),
+            "delay_between_ms": int(
+                float(merged_extra.pop("split_replies_delay_seconds", 0.35)) * 1000
+            ),
+        }
     config = PlatformConfig(
         enabled=True,
         token="fake-token",
-        extra={"rich_messages": True, **(extra or {})},
+        extra=merged_extra,
     )
     adapter = TelegramAdapter(config)
     bot = MagicMock()
@@ -72,6 +82,73 @@ def _rich_api_kwargs(adapter):
     call = adapter._bot.do_api_request.call_args
     assert call.args[0] == "sendRichMessage"
     return call.kwargs["api_kwargs"]
+
+
+def test_split_reply_delimiter_records_preceding_dash_count_and_ignores_code_fences():
+    result = _split_reply_delimited_for_telegram(
+        "First\n\n-----\n\nSecond\n\n```\n---\n```\n\n-----------\n\nThird"
+    )
+
+    assert result == [
+        ("First", 0),
+        ("Second\n\n```\n---\n```", 5),
+        ("Third", 11),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_split_reply_delay_scales_by_separator_dash_count(monkeypatch):
+    adapter = _make_adapter(
+        extra={
+            "split_replies": True,
+            "split_replies_delimiter": "---",
+            "split_replies_delay_seconds": 2,
+        }
+    )
+    adapter._bot.do_api_request = AsyncMock(
+        side_effect=[
+            SimpleNamespace(message_id=101),
+            SimpleNamespace(message_id=102),
+            SimpleNamespace(message_id=103),
+        ]
+    )
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr("gateway.platforms.telegram.asyncio.sleep", fake_sleep)
+
+    result = await adapter.send("12345", "First\n\n---\n\nSecond\n\n-----\n\nThird")
+
+    assert result.success is True
+    assert result.raw_response["message_ids"] == ["101", "102", "103"]
+    assert sleeps == [2.0, 4.0]
+
+
+@pytest.mark.asyncio
+async def test_split_reply_delay_multiplier_is_capped(monkeypatch):
+    adapter = _make_adapter(
+        extra={
+            "split_replies": True,
+            "split_replies_delimiter": "---",
+            "split_replies_delay_seconds": 2,
+        }
+    )
+    adapter._bot.do_api_request = AsyncMock(
+        side_effect=[SimpleNamespace(message_id=101), SimpleNamespace(message_id=102)]
+    )
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr("gateway.platforms.telegram.asyncio.sleep", fake_sleep)
+
+    result = await adapter.send("12345", "First\n\n----------------\n\nSecond")
+
+    assert result.success is True
+    assert sleeps == [10.0]
 
 
 @pytest.mark.asyncio

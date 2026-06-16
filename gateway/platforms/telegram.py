@@ -133,16 +133,17 @@ def _split_reply_delimited_for_telegram(
     *,
     delimiter: str = "---",
     max_parts: int = 8,
-) -> list[str]:
+) -> list[tuple[str, int]]:
     """Split assistant text on explicit delimiter lines outside code fences."""
     if not text or max_parts <= 1:
-        return [text]
+        return [(text, 0)]
     delimiter = str(delimiter or "---").strip()
     if not delimiter:
-        return [text]
+        return [(text, 0)]
 
-    parts: list[str] = []
+    parts: list[tuple[str, int]] = []
     current: list[str] = []
+    current_dash_count = 0
     in_code_fence = False
     saw_delimiter = False
 
@@ -150,27 +151,41 @@ def _split_reply_delimited_for_telegram(
         line_body = line.rstrip("\r\n")
         if line_body.lstrip().startswith("```"):
             in_code_fence = not in_code_fence
-        if not in_code_fence and line_body.strip() == delimiter:
+        stripped_line = line_body.strip()
+        delimiter_match = re.fullmatch(r'-{3,}', stripped_line)
+        if not in_code_fence and delimiter_match:
             saw_delimiter = True
             part = "".join(current).strip()
             if part:
-                parts.append(part)
+                parts.append((part, current_dash_count))
+            current_dash_count = len(stripped_line)
             current = []
             continue
         current.append(line)
 
     if not saw_delimiter:
-        return [text]
+        return [(text, 0)]
 
     tail = "".join(current).strip()
     if tail:
-        parts.append(tail)
+        parts.append((tail, current_dash_count))
 
     if not parts:
-        return [text]
+        return [(text, 0)]
     if len(parts) > max_parts:
-        return parts[: max_parts - 1] + ["\n\n".join(parts[max_parts - 1:])]
+        head = parts[: max_parts - 1]
+        tail_parts = parts[max_parts - 1:]
+        merged_text = "\n\n".join(part for part, _dash_count in tail_parts)
+        return head + [(merged_text, tail_parts[0][1])]
     return parts
+
+
+def _split_reply_delay_seconds(base_delay: float, dash_count: int) -> float:
+    """Scale split-reply delay by the preceding delimiter's dash count."""
+    if dash_count < 3:
+        return base_delay
+    multiplier = min(5.0, 1.0 + (dash_count - 3) * 0.5)
+    return base_delay * multiplier
 
 
 def check_telegram_requirements() -> bool:
@@ -2435,10 +2450,10 @@ class TelegramAdapter(BasePlatformAdapter):
                     max_parts=getattr(self, "_split_replies_max_parts", 8),
                 )
                 if getattr(self, "_split_replies_enabled", False)
-                else [content]
+                else [(content, 0)]
             )
             legacy_parts = []
-            for raw_part in raw_parts:
+            for raw_part, dash_count in raw_parts:
                 formatted = self.format_message(raw_part)
                 part_chunks = self.truncate_message(
                     formatted, self.MAX_MESSAGE_LENGTH, len_fn=utf16_len,
@@ -2451,7 +2466,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         re.sub(r" \((\d+)/(\d+)\)$", r" \\(\1/\2\\)", chunk)
                         for chunk in part_chunks
                     ]
-                legacy_parts.append((raw_part, part_chunks))
+                legacy_parts.append((raw_part, dash_count, part_chunks))
             
             message_ids = []
             thread_id = self._metadata_thread_id(metadata)
@@ -2473,7 +2488,7 @@ class TelegramAdapter(BasePlatformAdapter):
             except (ImportError, AttributeError):
                 _TimedOut = None  # type: ignore[assignment,misc]
 
-            for part_index, (raw_part, part_chunks) in enumerate(legacy_parts):
+            for part_index, (raw_part, dash_count, part_chunks) in enumerate(legacy_parts):
                 chunk_index = len(message_ids)
                 # Bot API 10.1 rich path: send the raw agent markdown via
                 # sendRichMessage so tables/task lists/etc. render natively.
@@ -2496,7 +2511,13 @@ class TelegramAdapter(BasePlatformAdapter):
                                 and part_index < len(legacy_parts) - 1
                                 and getattr(self, "_split_replies_delay_seconds", 0.0) > 0
                             ):
-                                await asyncio.sleep(self._split_replies_delay_seconds)
+                                next_dash_count = legacy_parts[part_index + 1][1]
+                                await asyncio.sleep(
+                                    _split_reply_delay_seconds(
+                                        self._split_replies_delay_seconds,
+                                        next_dash_count,
+                                    )
+                                )
                             continue
                         return rich_result
 
@@ -2688,7 +2709,17 @@ class TelegramAdapter(BasePlatformAdapter):
                         )
                         and getattr(self, "_split_replies_delay_seconds", 0.0) > 0
                     ):
-                        await asyncio.sleep(self._split_replies_delay_seconds)
+                        next_dash_count = (
+                            dash_count
+                            if chunk_index_within_part < len(part_chunks) - 1
+                            else legacy_parts[part_index + 1][1]
+                        )
+                        await asyncio.sleep(
+                            _split_reply_delay_seconds(
+                                self._split_replies_delay_seconds,
+                                next_dash_count,
+                            )
+                        )
 
             # Re-trigger typing indicator after sending a message.
             # Telegram clears the typing state when a new message is delivered,

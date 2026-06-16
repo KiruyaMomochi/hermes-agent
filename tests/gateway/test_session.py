@@ -1,5 +1,8 @@
 """Tests for gateway session management."""
 import json
+import os
+import subprocess
+import sys
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -193,6 +196,53 @@ class TestBuildSessionContextPrompt:
 
         assert "Telegram" in prompt
         assert "Home Chat" in prompt
+
+    def test_telegram_split_notes_prompt_override_yaml_custom_and_null(self, tmp_path):
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+from gateway.config import Platform, GatewayConfig, PlatformConfig
+from gateway.session import SessionSource, build_session_context, build_session_context_prompt
+
+config = GatewayConfig(platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token='fake-token')})
+source = SessionSource(platform=Platform.TELEGRAM, chat_id='111', chat_name='Home Chat', chat_type='dm')
+prompt = build_session_context_prompt(build_session_context(source, config))
+print(prompt)
+"""
+        env = {
+            **os.environ,
+            "HERMES_HOME": str(tmp_path),
+            "PYTHONPATH": str(repo_root),
+        }
+
+        (tmp_path / "prompt_overrides.yaml").write_text(
+            "TELEGRAM_SPLIT_NOTES: Custom split note\n",
+            encoding="utf-8",
+        )
+        custom = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=repo_root,
+            env=env,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout
+        assert "Custom split note" in custom
+        assert "delimiter is removed" not in custom
+
+        (tmp_path / "prompt_overrides.yaml").write_text(
+            "TELEGRAM_SPLIT_NOTES: null\n",
+            encoding="utf-8",
+        )
+        disabled = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=repo_root,
+            env=env,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout
+        assert "**Platform notes:** You are responding via Telegram" not in disabled
+        assert "delimiter is removed" not in disabled
 
     def test_bluebubbles_prompt_mentions_short_conversational_i_message_format(self):
         config = GatewayConfig(

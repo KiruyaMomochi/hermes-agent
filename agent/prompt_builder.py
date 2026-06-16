@@ -510,6 +510,11 @@ STEER_CHANNEL_NOTE = (
 # message representation stays consistent ("system" everywhere).
 DEVELOPER_ROLE_MODELS = ("gpt-5", "codex")
 
+TELEGRAM_SPLIT_NOTES = (
+    "If a reply should arrive as multiple chat bubbles, put `---` on its own "
+    "line between bubbles. The delimiter is removed before sending."
+)
+
 PLATFORM_HINTS = {
     "whatsapp": (
         "You are on a text messaging communication platform, WhatsApp. "
@@ -1803,6 +1808,7 @@ _OVERRIDABLE_CONSTANTS = (
     "OPENAI_MODEL_EXECUTION_GUIDANCE",
     "GOOGLE_MODEL_OPERATIONAL_GUIDANCE",
     "COMPUTER_USE_GUIDANCE",
+    "TELEGRAM_SPLIT_NOTES",
 )
 
 if _PROMPT_OVERRIDES:
