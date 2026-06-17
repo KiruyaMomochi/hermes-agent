@@ -911,14 +911,9 @@ class GatewayStreamConsumer:
     # treated identically whichever path delivered the text.
     _MEDIA_RE = MEDIA_TAG_CLEANUP_RE
 
-    _FORMATTED_REASONING_RE = re.compile(
-        r'^\s*💭\s*\*\*Reasoning:\*\*\s*\n```\s*\n.*?\n```\s*\n*',
-        re.DOTALL,
-    )
-
     @staticmethod
     def _clean_for_display(text: str) -> str:
-        """Strip MEDIA directives and internal markers from text before display.
+        """Strip MEDIA: directives and internal markers from text before display.
 
         The streaming path delivers raw text chunks that may include
         ``MEDIA:<path>`` tags and ``[[audio_as_voice]]`` directives meant for
@@ -927,12 +922,9 @@ class GatewayStreamConsumer:
         stream finishes — we just need to hide the raw directives from the
         user.
         """
-        if not text:
+        if "MEDIA:" not in text and "[[audio_as_voice]]" not in text:
             return text
-        cleaned = GatewayStreamConsumer._FORMATTED_REASONING_RE.sub("", text)
-        if "MEDIA:" not in cleaned and "[[audio_as_voice]]" not in cleaned:
-            return cleaned
-        cleaned = cleaned.replace("[[audio_as_voice]]", "")
+        cleaned = text.replace("[[audio_as_voice]]", "")
         cleaned = GatewayStreamConsumer._MEDIA_RE.sub("", cleaned)
         # Collapse excessive blank lines left behind by removed tags
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)

@@ -367,13 +367,6 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     return redacted
 
 
-def _allows_gateway_reasoning_display(platform: Any) -> bool:
-    """Return True when gateway replies may include model reasoning text."""
-    # Telegram is a personal/mobile delivery surface.  Reasoning metadata is
-    # internal there even if a stale/global config toggle says to show it.
-    return _gateway_platform_value(platform) != "telegram"
-
-
 def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:
     """Filter/sanitize agent status callbacks before platform delivery."""
     text = str(message or "").strip()
@@ -9356,7 +9349,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     if source.platform == Platform.MATTERMOST
                     else getattr(self, "_show_reasoning", False)
                 )
-            if _show_reasoning_effective and response and not _intentional_silence and _allows_gateway_reasoning_display(source.platform):
+            if _show_reasoning_effective and response and not _intentional_silence:
                 last_reasoning = agent_result.get("last_reasoning")
                 if last_reasoning:
                     # Collapse long reasoning to keep messages readable
