@@ -23,7 +23,7 @@ class TestGatewayStreamConsumerDrainTimeout:
         run_py = Path(__file__).resolve().parents[2] / "gateway" / "run.py"
         source = run_py.read_text(encoding="utf-8")
         assert "_STREAM_CONSUMER_DRAIN_TIMEOUT_SECS = 30.0" in source
-        assert "timeout=_STREAM_CONSUMER_DRAIN_TIMEOUT_SECS" in source
+        assert "timeout=_stream_consumer_drain_timeout(self.config)" in source
 
 
 # ── _clean_for_display unit tests ────────────────────────────────────────

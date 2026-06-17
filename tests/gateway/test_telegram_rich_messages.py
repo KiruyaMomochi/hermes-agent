@@ -107,9 +107,7 @@ async def test_split_reply_delay_scales_by_separator_dash_count(monkeypatch):
     )
     adapter._bot.do_api_request = AsyncMock(
         side_effect=[
-            SimpleNamespace(message_id=101),
             SimpleNamespace(message_id=102),
-            SimpleNamespace(message_id=103),
         ]
     )
     sleeps = []
@@ -122,7 +120,11 @@ async def test_split_reply_delay_scales_by_separator_dash_count(monkeypatch):
     result = await adapter.send("12345", "First\n\n---\n\nSecond\n\n-----\n\nThird")
 
     assert result.success is True
-    assert result.raw_response["message_ids"] == ["101", "102", "103"]
+    bot = adapter._bot
+    assert bot is not None
+    assert result.raw_response["message_ids"] == ["1", "1", "1"]
+    assert bot.do_api_request.await_count == 0
+    assert bot.send_message.await_count == 3
     assert sleeps == [2.0, 4.0]
 
 
@@ -666,7 +668,7 @@ async def test_split_replies_attempt_rich_per_part_before_legacy_path():
         ]
     )
 
-    result = await adapter.send("12345", "## First\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n---\n\n## Second", reply_to="999")
+    result = await adapter.send("12345", "## First\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n---\n\n| C | D |\n|---|---|\n| 3 | 4 |", reply_to="999")
 
     assert result.success is True
     assert result.message_id == "101"
@@ -680,7 +682,7 @@ async def test_split_replies_attempt_rich_per_part_before_legacy_path():
     second_payload = second_call.kwargs["api_kwargs"]
     assert first_payload["rich_message"]["markdown"].startswith("## First")
     assert "---\n\n## Second" not in first_payload["rich_message"]["markdown"]
-    assert second_payload["rich_message"]["markdown"] == "## Second"
+    assert second_payload["rich_message"]["markdown"] == "| C | D |\n|---|---|\n| 3 | 4 |"
     assert first_payload["reply_parameters"] == {"message_id": 999}
     assert "reply_parameters" not in second_payload
 
@@ -702,7 +704,7 @@ async def test_split_replies_falls_back_to_legacy_per_part_when_rich_rejected():
     )
     adapter._bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=201))
 
-    result = await adapter.send("12345", "**legacy fallback**\n\n---\n\n## Rich second", reply_to="999")
+    result = await adapter.send("12345", "| A | B |\n|---|---|\n| 1 | 2 |\n\n---\n\n| C | D |\n|---|---|\n| 3 | 4 |", reply_to="999")
 
     assert result.success is True
     assert result.message_id == "201"
@@ -712,7 +714,7 @@ async def test_split_replies_falls_back_to_legacy_per_part_when_rich_rejected():
     legacy_call = adapter._bot.send_message.await_args
     assert legacy_call.kwargs["reply_to_message_id"] == 999
     second_payload = adapter._bot.do_api_request.await_args_list[1].kwargs["api_kwargs"]
-    assert second_payload["rich_message"]["markdown"] == "## Rich second"
+    assert second_payload["rich_message"]["markdown"] == "| C | D |\n|---|---|\n| 3 | 4 |"
     assert "reply_parameters" not in second_payload
 
 

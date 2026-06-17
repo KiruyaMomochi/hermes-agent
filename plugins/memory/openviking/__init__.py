@@ -160,6 +160,18 @@ def _derive_openviking_user_text(content: Any) -> str:
     return extract_user_instruction_from_skill_message(content) or ""
 
 
+def _openviking_user_text_for_hook(content: Any) -> str:
+    """Return user text for direct OpenViking hooks.
+
+    String turns may be slash-skill scaffolding and need the canonical extractor;
+    non-string multimodal/tool-shaped turns should still use the OpenViking text
+    normalizer instead of being dropped.
+    """
+    if isinstance(content, str):
+        return _derive_openviking_user_text(content)
+    return _content_to_text(content)
+
+
 # ---------------------------------------------------------------------------
 # Process-level atexit safety net — ensures pending sessions are committed
 # even if shutdown_memory_provider is never called (e.g. gateway crash,
@@ -769,7 +781,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
     @staticmethod
     def _normalize_prefetch_query(query: Any) -> str:
-        query_text = _content_to_text(query)
+        query_text = _openviking_user_text_for_hook(query)
         return re.sub(r"^\[\d{1,2}[-:]\d{2}(?:\s\d{2}:\d{2})?\]\s*", "", query_text)
 
     def _fetch_prefetch_context(self, query: Any, *, source: str) -> str:
@@ -890,8 +902,15 @@ class OpenVikingMemoryProvider(MemoryProvider):
         if not self._client:
             return
 
-        user_text = _content_to_text(user_content)
+        user_text = _openviking_user_text_for_hook(user_content)
         assistant_text = _content_to_text(assistant_content)
+        if (
+            not user_text
+            and isinstance(user_content, str)
+            and user_content.startswith('[IMPORTANT: The user has invoked')
+        ):
+            logger.debug("OpenViking sync_turn skipped: skill invocation without user instruction")
+            return
         if not user_text and not assistant_text:
             logger.debug("OpenViking sync_turn skipped: empty normalized turn")
             return

@@ -299,11 +299,21 @@ class TestOpenVikingSkillQuerySafety:
         assert RecordingVikingClient.calls == [
             (
                 "/api/v1/sessions/session-1/messages",
-                {"role": "user", "content": "make a skill for release triage"},
+                {
+                    "role": "user",
+                    "peer_id": "default",
+                    "role_id": "default",
+                    "content": "make a skill for release triage",
+                },
             ),
             (
                 "/api/v1/sessions/session-1/messages",
-                {"role": "assistant", "content": "Done."},
+                {
+                    "role": "assistant",
+                    "peer_id": "hermes",
+                    "role_id": "hermes",
+                    "content": "Done.",
+                },
             ),
         ]
 

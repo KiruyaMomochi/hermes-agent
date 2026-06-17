@@ -346,13 +346,31 @@ def _append_missing_path_entries(existing_path: str, candidates: list[str]) -> s
     """Append missing PATH entries without disturbing existing order."""
     if _IS_WINDOWS:
         return existing_path
-    entries = existing_path.split(":") if existing_path else []
-    seen = {entry for entry in entries if entry}
+    entries: list[str] = []
+    seen: set[str] = set()
+    for entry in existing_path.split(":") if existing_path else []:
+        if entry and entry not in seen:
+            entries.append(entry)
+            seen.add(entry)
     for entry in candidates:
         if entry and entry not in seen:
             entries.append(entry)
             seen.add(entry)
     return ":".join(entries)
+
+
+def _append_missing_sane_path_entries(existing_path: str) -> str:
+    """Backward-compatible wrapper for appending Hermes' sane PATH entries.
+
+    Older tests and any external imports used this helper directly before the
+    path-fill refactor split candidate discovery from append mechanics. Keep the
+    public-ish name as a thin wrapper so Windows gating and POSIX fill semantics
+    remain available without duplicating logic.
+    """
+    return _append_missing_path_entries(
+        existing_path,
+        _path_fill_candidates({"PATH": existing_path}),
+    )
 
 
 def _path_repair_entries(env: dict) -> list[str]:
