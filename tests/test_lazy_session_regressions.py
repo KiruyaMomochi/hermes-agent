@@ -422,6 +422,63 @@ class TestGatewayCurrentTurnDbPrefix:
 
         assert _count_gateway_current_turn_db_prefix(persisted, expected_entries) == 2
 
+    def test_persist_user_message_override_matches_native_image_agent_persistence(self):
+        from gateway.run import (
+            _count_gateway_current_turn_db_prefix,
+            _entries_for_agent_db_persistence_compare,
+        )
+
+        persisted = [
+            {"role": "user", "content": "caption"},
+            {"role": "assistant", "content": "ok"},
+        ]
+        live_current_turn = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "caption"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "abc"}},
+                ],
+            },
+            {"role": "assistant", "content": "ok"},
+        ]
+
+        expected_entries = _entries_for_agent_db_persistence_compare(
+            live_current_turn,
+            persist_user_message="caption",
+            persist_user_timestamp=None,
+        )
+
+        assert _count_gateway_current_turn_db_prefix(persisted, expected_entries) == 2
+
+    def test_empty_persist_user_message_override_matches_image_only_agent_persistence(self):
+        from gateway.run import (
+            _count_gateway_current_turn_db_prefix,
+            _entries_for_agent_db_persistence_compare,
+        )
+
+        persisted = [
+            {"role": "user", "content": ""},
+            {"role": "assistant", "content": "ok"},
+        ]
+        live_current_turn = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "abc"}},
+                ],
+            },
+            {"role": "assistant", "content": "ok"},
+        ]
+
+        expected_entries = _entries_for_agent_db_persistence_compare(
+            live_current_turn,
+            persist_user_message="",
+            persist_user_timestamp=None,
+        )
+
+        assert _count_gateway_current_turn_db_prefix(persisted, expected_entries) == 2
+
 
 # ===========================================================================
 # Bug #18765: Gateway surfaces null response

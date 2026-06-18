@@ -922,9 +922,16 @@ class GatewayStreamConsumer:
         stream finishes — we just need to hide the raw directives from the
         user.
         """
-        if "MEDIA:" not in text and "[[audio_as_voice]]" not in text:
-            return text
-        cleaned = text.replace("[[audio_as_voice]]", "")
+        cleaned = re.sub(
+            r'^💭 \*\*Reasoning:\*\*\n```\n.*?\n```\n\n?',
+            '',
+            text,
+            count=1,
+            flags=re.DOTALL,
+        )
+        if "MEDIA:" not in cleaned and "[[audio_as_voice]]" not in cleaned:
+            return cleaned
+        cleaned = cleaned.replace("[[audio_as_voice]]", "")
         cleaned = GatewayStreamConsumer._MEDIA_RE.sub("", cleaned)
         # Collapse excessive blank lines left behind by removed tags
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)

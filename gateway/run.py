@@ -204,6 +204,11 @@ def _gateway_platform_value(platform: Any) -> str:
     return str(getattr(platform, "value", platform) or "").strip().lower()
 
 
+def _allows_gateway_reasoning_display(platform: Any) -> bool:
+    """Return whether final gateway replies may include reasoning preambles."""
+    return _gateway_platform_value(platform) != "telegram"
+
+
 def _is_transient_network_error(exc: BaseException) -> bool:
     """Return True for transient network errors safe to log + swallow.
 
@@ -777,6 +782,39 @@ def _message_content_for_db_compare(content: Any) -> Any:
                 parts.append("[screenshot]")
         return _normalize_text("\n".join(parts)) if parts else None
     return _normalize_text(content)
+
+
+def _entries_for_agent_db_persistence_compare(
+    entries: List[Dict[str, Any]],
+    *,
+    persist_user_message: Any = None,
+    persist_user_timestamp: Any = None,
+) -> List[Dict[str, Any]]:
+    """Return current-turn entries as AIAgent writes them to state.db.
+
+    Native multimodal gateway turns keep image blocks in the live provider
+    messages, but pass ``persist_user_message`` so AIAgent stores the text-only
+    transcript view.  Gateway's mirror fallback must compare against that
+    persistence view; otherwise it thinks the agent missed the user row and
+    writes the multimodal row a second time.
+    """
+    if persist_user_message is None and persist_user_timestamp is None:
+        return entries
+
+    expected: List[Dict[str, Any]] = []
+    user_override_applied = False
+    for entry in entries:
+        if entry.get("role") == "user" and not user_override_applied:
+            compare_entry = dict(entry)
+            if persist_user_message is not None:
+                compare_entry["content"] = persist_user_message
+            if persist_user_timestamp is not None:
+                compare_entry["timestamp"] = persist_user_timestamp
+            expected.append(compare_entry)
+            user_override_applied = True
+        else:
+            expected.append(entry)
+    return expected
 
 
 def _count_gateway_current_turn_db_prefix(
@@ -9349,7 +9387,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     if source.platform == Platform.MATTERMOST
                     else getattr(self, "_show_reasoning", False)
                 )
-            if _show_reasoning_effective and response and not _intentional_silence:
+            if (
+                _show_reasoning_effective
+                and _allows_gateway_reasoning_display(source.platform)
+                and response
+                and not _intentional_silence
+            ):
                 last_reasoning = agent_result.get("last_reasoning")
                 if last_reasoning:
                     # Collapse long reasoning to keep messages readable
@@ -9555,7 +9598,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
                     return 0
 
-                prefix_len = _count_gateway_current_turn_db_prefix(persisted, expected_entries)
+                prefix_len = _count_gateway_current_turn_db_prefix(
+                    persisted,
+                    _entries_for_agent_db_persistence_compare(
+                        expected_entries,
+                        persist_user_message=persist_user_message,
+                        persist_user_timestamp=persist_user_timestamp,
+                    ),
+                )
                 if prefix_len >= len(expected_entries):
                     return len(expected_entries)
                 if prefix_len:
