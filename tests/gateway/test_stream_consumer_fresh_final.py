@@ -617,15 +617,15 @@ class TestStreamConsumerConfigFreshFinalField:
 class TestStreamingConfigFreshFinalField:
     """The gateway-level StreamingConfig carries the setting."""
 
-    def test_default_is_disabled(self):
+    def test_default_is_enabled_for_telegram_timestamp_refresh(self):
         from gateway.config import StreamingConfig
         cfg = StreamingConfig()
-        assert cfg.fresh_final_after_seconds == 0.0
+        assert cfg.fresh_final_after_seconds == 60.0
 
     def test_from_dict_uses_default_when_missing(self):
         from gateway.config import StreamingConfig
         cfg = StreamingConfig.from_dict({"enabled": True})
-        assert cfg.fresh_final_after_seconds == 0.0
+        assert cfg.fresh_final_after_seconds == 60.0
 
     def test_from_dict_respects_explicit_zero(self):
         from gateway.config import StreamingConfig

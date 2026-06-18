@@ -462,7 +462,7 @@ class StreamingConfig:
             ),
             cursor=data.get("cursor", DEFAULT_STREAMING_CURSOR),
             fresh_final_after_seconds=_coerce_float(
-                data.get("fresh_final_after_seconds"), 0.0
+                data.get("fresh_final_after_seconds"), cls().fresh_final_after_seconds
             ),
             drain_timeout_seconds=_coerce_positive_finite_float(
                 data.get("drain_timeout_seconds"),

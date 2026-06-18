@@ -514,7 +514,16 @@ async def test_handle_message_discards_stale_result_after_session_invalidation(m
     result = await runner._handle_message(_make_event("hello"))
 
     assert result is None
-    runner.session_store.append_to_transcript.assert_not_called()
+    # Upstream #5244 intentionally persists the interrupted user turn even
+    # when the stale agent result is discarded, so /retry can target the
+    # message that was interrupted instead of an older user turn.  The stale
+    # assistant result must still be dropped.
+    runner.session_store.append_to_transcript.assert_called_once()
+    appended_session_id, appended_message = runner.session_store.append_to_transcript.call_args.args
+    assert appended_session_id == "sess-1"
+    assert appended_message["role"] == "user"
+    assert appended_message["content"] == "hello"
+    assert appended_message["message_id"] == "m1"
     runner.session_store.update_session.assert_not_called()
     assert session_key not in runner.adapters[Platform.TELEGRAM]._post_delivery_callbacks
 

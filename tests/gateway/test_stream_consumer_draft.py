@@ -401,6 +401,42 @@ class TestAdapterPrefersFreshFinal:
 
         assert consumer.final_response_sent is True
 
+    @pytest.mark.asyncio
+    async def test_split_reply_fresh_final_suppresses_duplicate_full_final(self):
+        from gateway.platforms.base import SendResult
+
+        adapter = _make_fresh_final_adapter()
+        adapter._split_replies_enabled = True
+        adapter.send = AsyncMock(side_effect=[
+            SendResult(success=True, message_id="preview1"),
+            SendResult(success=True, message_id="fresh1"),
+            SendResult(success=True, message_id="second1"),
+        ])
+        cfg = StreamConsumerConfig(
+            transport="edit", chat_type="dm",
+            edit_interval=0.01, buffer_threshold=5, cursor="",
+            fresh_final_after_seconds=0.0,
+        )
+        consumer = GatewayStreamConsumer(adapter, "12345", cfg)
+
+        consumer.on_delta("First bubble")
+        task = asyncio.create_task(consumer.run())
+        # Let the first bubble become an editable preview before the split
+        # delimiter arrives; finalizing that segment then takes the
+        # fresh-final path (fresh send + preview delete).
+        await asyncio.sleep(0.05)
+        consumer.on_delta("\n---\nSecond bubble")
+        await asyncio.sleep(0.05)
+        consumer.finish()
+        await task
+
+        sent_contents = [c.kwargs.get("content") for c in adapter.send.await_args_list]
+        assert sent_contents == ["First bubble", "First bubble", "Second bubble"]
+        assert "First bubble\n---\nSecond bubble" not in sent_contents
+        adapter.delete_message.assert_awaited_once_with("12345", "preview1")
+        adapter.edit_message.assert_not_called()
+        assert consumer.final_response_sent is True
+
 
 def _make_rich_capable_adapter(*, overflow_limit=32768, send_results=None):
     """Non-draft adapter that mimics Telegram rich messages: REQUIRES_EDIT_FINALIZE,

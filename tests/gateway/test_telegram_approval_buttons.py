@@ -50,6 +50,16 @@ from gateway.platforms.telegram import TelegramAdapter
 from gateway.config import Platform, PlatformConfig
 
 
+def _is_markdown_v2(parse_mode) -> bool:
+    """Accept both PTB enum values and string/mocked ParseMode constants."""
+    return (
+        parse_mode == "MarkdownV2"
+        or str(parse_mode) == "MarkdownV2"
+        or str(parse_mode).endswith(".MARKDOWN_V2")
+        or "MARKDOWN_V2" in repr(parse_mode)
+    )
+
+
 def _make_adapter(extra=None):
     """Create a TelegramAdapter with mocked internals."""
     config = PlatformConfig(enabled=True, token="test-token", extra=extra or {})
@@ -213,7 +223,7 @@ class TestTelegramExecApproval:
         )
 
         assert result.success is True
-        assert "MARKDOWN_V2" in repr(sent["parse_mode"])
+        assert _is_markdown_v2(sent["parse_mode"])
         assert "Fix \\[issue\\]\\_1" in sent["text"]
         assert "alpha\\_beta" in sent["text"]
 
@@ -355,7 +365,7 @@ class TestTelegramApprovalCallback:
                 await adapter._handle_callback_query(update, context)
 
         edit_kwargs = query.edit_message_text.call_args[1]
-        assert "MARKDOWN_V2" in repr(edit_kwargs["parse_mode"])
+        assert _is_markdown_v2(edit_kwargs["parse_mode"])
         assert "Alice\\_Bob" in edit_kwargs["text"]
         assert "Approved once" in edit_kwargs["text"]
 
