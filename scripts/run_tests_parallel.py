@@ -660,33 +660,37 @@ def _run_one_file_once(
     env["TMPDIR"] = temproot
 
     subproc_start = time.monotonic()
+    # Isolate HERMES_HOME before collection-time imports can read real overrides.
+    subprocess_hermes_home = tempfile.mkdtemp(prefix="hermes-test-file-")
+    env["HERMES_HOME"] = subprocess_hermes_home
     proc, pgid = start_pytest(file, pytest_args, repo_root, env, _runner_scratch_root())
 
     try:
-        output, _ = proc.communicate(timeout=file_timeout)
-        rc = proc.returncode
-    except subprocess.TimeoutExpired:
-        _kill_tree(proc, pgid=pgid)
         try:
-            output, _ = proc.communicate(timeout=10)
+            output, _ = proc.communicate(timeout=file_timeout)
+            rc = proc.returncode
         except subprocess.TimeoutExpired:
-            output = "(file timeout exceeded; output unavailable)"
-        rc = 124  # de facto convention for "killed by timeout".
-        output = (
-            f"({file_timeout:.0f}s exceeded; "
-            f"process tree SIGKILL'd)\n{output}"
-        )
-    except BaseException:
-        # KeyboardInterrupt / runner crash — make sure no zombie
-        # grandchildren outlive us.
-        _kill_tree(proc, pgid=pgid)
-        raise
-    else:
-        # Happy path: pytest exited on its own. Kill the group anyway in
-        # case it left grandchildren behind; already-dead is a no-op.
-        _kill_tree(proc, pgid=pgid)
+            _kill_tree(proc, pgid=pgid)
+            try:
+                output, _ = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                output = "(file timeout exceeded; output unavailable)"
+            rc = 124  # de facto convention for "killed by timeout".
+            output = (
+                f"({file_timeout:.0f}s exceeded; "
+                f"process tree SIGKILL'd)\n{output}"
+            )
+        except BaseException:
+            # KeyboardInterrupt / runner crash — make sure no zombie
+            # grandchildren outlive us.
+            _kill_tree(proc, pgid=pgid)
+            raise
+        else:
+            # Happy path: pytest exited on its own. Kill the group anyway in
+            # case it left grandchildren behind; already-dead is a no-op.
+            _kill_tree(proc, pgid=pgid)
 
-        output +=  "\n"
+        output += "\n"
     finally:
         _kill_detached_leftovers(temproot)
         # Delete the temp root for this attempt. Nothing reads it after the
@@ -694,6 +698,7 @@ def _run_one_file_once(
         # runner over one suite. Permission fixtures leave read-only dirs
         # behind; make them writable and retry instead of skipping them.
         _rmtree_force(temproot)
+        _rmtree_force(subprocess_hermes_home)
 
     if rc not in (0, 5) and not output.strip():
         output = f"pytest child exited {rc} (0x{rc & 0xffffffff:08x}) with no output: {file}\n"
