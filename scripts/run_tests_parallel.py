@@ -536,6 +536,16 @@ def _run_one_file_once(
     env["TMPDIR"] = temproot
 
     subproc_start = time.monotonic()
+    # Isolate HERMES_HOME before pytest starts. The autouse fixture in
+    # tests/conftest.py redirects it again per test, but fixtures run after
+    # collection-time module imports. Without this process-level boundary,
+    # modules such as agent.prompt_builder can read the developer's real
+    # prompt_overrides.yaml during collection and make local results diverge
+    # from CI.
+    subprocess_hermes_home = tempfile.mkdtemp(prefix="hermes-test-file-")
+    child_env = os.environ.copy()
+    child_env["HERMES_HOME"] = subprocess_hermes_home
+
     # launch the pytest process
     proc = subprocess.Popen(
         cmd,
@@ -543,7 +553,7 @@ def _run_one_file_once(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
-        env=env,
+        env={**env, "HERMES_HOME": subprocess_hermes_home},
         # POSIX: place the child at the head of its own process group so
         # _kill_tree can SIGKILL the group atomically.
         # Windows: this maps to CREATE_NEW_PROCESS_GROUP in CPython 3.12+;
@@ -563,36 +573,38 @@ def _run_one_file_once(
             pgid = None
 
     try:
-        output, _ = proc.communicate(timeout=file_timeout)
-        rc = proc.returncode
-    except subprocess.TimeoutExpired:
-        _kill_tree(proc, pgid=pgid)
         try:
-            output, _ = proc.communicate(timeout=10)
+            output, _ = proc.communicate(timeout=file_timeout)
+            rc = proc.returncode
         except subprocess.TimeoutExpired:
-            output = "(file timeout exceeded; output unavailable)"
-        rc = 124  # de facto convention for "killed by timeout".
-        output = (
-            f"({file_timeout:.0f}s exceeded; "
-            f"process tree SIGKILL'd)\n{output}"
-        )
-    except BaseException:
-        # KeyboardInterrupt / runner crash — make sure no zombie
-        # grandchildren outlive us.
-        _kill_tree(proc, pgid=pgid)
-        raise
-    else:
-        # Happy path: pytest exited on its own. Kill the group anyway in
-        # case it left grandchildren behind; already-dead is a no-op.
-        _kill_tree(proc, pgid=pgid)
+            _kill_tree(proc, pgid=pgid)
+            try:
+                output, _ = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                output = "(file timeout exceeded; output unavailable)"
+            rc = 124  # de facto convention for "killed by timeout".
+            output = (
+                f"({file_timeout:.0f}s exceeded; "
+                f"process tree SIGKILL'd)\n{output}"
+            )
+        except BaseException:
+            # KeyboardInterrupt / runner crash — make sure no zombie
+            # grandchildren outlive us.
+            _kill_tree(proc, pgid=pgid)
+            raise
+        else:
+            # Happy path: pytest exited on its own. Kill the group anyway in
+            # case it left grandchildren behind; already-dead is a no-op.
+            _kill_tree(proc, pgid=pgid)
 
-        output +=  "\n"
+        output += "\n"
     finally:
         # Delete the temp root for this attempt. Nothing reads it after the
         # subprocess exits. More than 3000 of them fill the disk of the
         # runner over one suite. Permission fixtures leave read-only dirs
         # behind; make them writable and retry instead of skipping them.
         _rmtree_force(temproot)
+        _rmtree_force(subprocess_hermes_home)
 
     if rc not in (0, 5) and not output.strip():
         output = f"pytest child exited {rc} (0x{rc & 0xffffffff:08x}) with no output: {file}\n"
