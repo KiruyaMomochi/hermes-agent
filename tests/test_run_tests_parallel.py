@@ -31,17 +31,6 @@ from pathlib import Path
 import pytest
 
 
-# Both tests share the same handoff file: the leaker writes here, the
-# verifier reads here. We park it in $TMPDIR with a unique-per-run name
-# so concurrent invocations of the suite don't clobber each other.
-_HANDOFF_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "hermes-isolation-probe"
-_HANDOFF_DIR.mkdir(exist_ok=True)
-
-
-def _handoff_path_for(nonce: str) -> Path:
-    return _HANDOFF_DIR / f"grandchild-{nonce}.json"
-
-
 def _pid_alive(pid: int) -> bool:
     """POSIX: send signal 0 to probe whether ``pid`` is still alive.
 
@@ -121,9 +110,12 @@ def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:
     probe_dir.mkdir()
     probe = probe_dir / "test_probe_leaker.py"
     nonce = f"{os.getpid()}-{int(time.time() * 1000)}"
-    handoff = _handoff_path_for(nonce)
-    if handoff.exists():
-        handoff.unlink()
+    # Keep the handoff inside pytest's per-test directory. A shared path
+    # under $TMPDIR can belong to another user/run and makes this test fail
+    # before it reaches the process-group cleanup assertion.
+    handoff_dir = tmp_path / "hermes-isolation-probe"
+    handoff_dir.mkdir()
+    handoff = handoff_dir / f"grandchild-{nonce}.json"
 
     probe_src = textwrap.dedent(f"""
         import json, os, subprocess, sys, time
@@ -310,6 +302,62 @@ def test_positional_path_not_treated_as_flag(tmp_path: Path) -> None:
     # Discovery found the probe file (2 tests), proving the positional path
     # was consumed as a root, not forwarded to pytest as a bad flag.
     assert "test_flagprobe.py" in proc.stdout, proc.stdout
+
+
+def test_runner_isolates_collection_time_hermes_home(tmp_path: Path) -> None:
+    """Collection-time imports must not read the developer's real profile.
+
+    ``tests/conftest.py`` redirects HERMES_HOME in an autouse fixture, but
+    fixtures run after test modules are imported. A module-level import of
+    ``agent.prompt_builder`` therefore used to load the caller's real
+    prompt_overrides.yaml before the fixture could isolate it. The canonical
+    runner must give each pytest subprocess a clean HERMES_HOME from process
+    start, not only once test execution begins.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    real_home = tmp_path / "real-hermes-home"
+    real_home.mkdir()
+    (real_home / "prompt_overrides.yaml").write_text(
+        "_COMBINED_REVIEW_PROMPT: leaked-from-real-profile\n",
+        encoding="utf-8",
+    )
+    probe = tmp_path / "test_collection_home_probe.py"
+    probe.write_text(
+        textwrap.dedent(
+            """
+            from agent.background_review import _COMBINED_REVIEW_PROMPT
+
+            def test_collection_import_uses_isolated_home():
+                assert _COMBINED_REVIEW_PROMPT != "leaked-from-real-profile"
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(real_home)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--files",
+            str(probe),
+            "--file-retries",
+            "0",
+            "-j",
+            "1",
+            "-q",
+        ],
+        cwd=repo_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout
 
 
 def test_file_retry_self_heals_and_prints_both_attempts(tmp_path: Path) -> None:
