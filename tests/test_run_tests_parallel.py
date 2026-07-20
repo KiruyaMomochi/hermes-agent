@@ -312,6 +312,62 @@ def test_positional_path_not_treated_as_flag(tmp_path: Path) -> None:
     assert "test_flagprobe.py" in proc.stdout, proc.stdout
 
 
+def test_runner_isolates_collection_time_hermes_home(tmp_path: Path) -> None:
+    """Collection-time imports must not read the developer's real profile.
+
+    ``tests/conftest.py`` redirects HERMES_HOME in an autouse fixture, but
+    fixtures run after test modules are imported. A module-level import of
+    ``agent.prompt_builder`` therefore used to load the caller's real
+    prompt_overrides.yaml before the fixture could isolate it. The canonical
+    runner must give each pytest subprocess a clean HERMES_HOME from process
+    start, not only once test execution begins.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    real_home = tmp_path / "real-hermes-home"
+    real_home.mkdir()
+    (real_home / "prompt_overrides.yaml").write_text(
+        "_COMBINED_REVIEW_PROMPT: leaked-from-real-profile\n",
+        encoding="utf-8",
+    )
+    probe = tmp_path / "test_collection_home_probe.py"
+    probe.write_text(
+        textwrap.dedent(
+            """
+            from agent.background_review import _COMBINED_REVIEW_PROMPT
+
+            def test_collection_import_uses_isolated_home():
+                assert _COMBINED_REVIEW_PROMPT != "leaked-from-real-profile"
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(real_home)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--files",
+            str(probe),
+            "--file-retries",
+            "0",
+            "-j",
+            "1",
+            "-q",
+        ],
+        cwd=repo_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+
+
 def test_file_retry_self_heals_and_prints_both_attempts(tmp_path: Path) -> None:
     """A pass-on-retry is green, loud, and retains the failing traceback."""
     repo_root = Path(__file__).resolve().parent.parent
