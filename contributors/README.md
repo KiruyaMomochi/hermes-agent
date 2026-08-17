@@ -17,6 +17,8 @@ echo "<github-login>" > contributors/emails/<email>
 ```
 
 - File **name** = the exact commit-author email (as shown by `git log --format='%ae'`).
+- Mapping filenames must be unique after Unicode case folding (`casefold()`),
+  so checkouts remain clean on case-insensitive filesystems.
 - File **content** = the GitHub login on the first non-comment line.
   Lines starting with `#` are comments (use them for the PR reference).
 
@@ -32,6 +34,10 @@ janedoe
 - Do NOT add new entries to `AUTHOR_MAP` in `scripts/release.py`. That dict
   is frozen legacy data; the release tooling merges it with this directory
   (directory entries win on duplicates).
+- If two distinct author emails differ only by case and require different
+  attribution, do not create colliding files. Keep one mapping file and add
+  the exceptional exact-case mapping to `LEGACY_AUTHOR_MAP` manually, with a
+  comment documenting why.
 - GitHub noreply emails (`<id>+<login>@users.noreply.github.com` and
   `<login>@users.noreply.github.com`) auto-resolve — no file needed.
 - The `Contributor Attribution Check` CI job fails a PR whose commits carry
