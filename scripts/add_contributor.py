@@ -84,6 +84,18 @@ def add_contributor(email: str, login: str, comment: str = "") -> int:
         print(f"error: {login!r} is not a valid GitHub login", file=sys.stderr)
         return 2
 
+    if EMAILS_DIR.is_dir():
+        folded_email = email.casefold()
+        for candidate in EMAILS_DIR.iterdir():
+            if candidate.name != email and candidate.name.casefold() == folded_email:
+                print(
+                    f"error: {email} has a case-fold collision with existing mapping "
+                    f"{candidate.name!r} — resolve manually (exact-case exceptions "
+                    "belong in LEGACY_AUTHOR_MAP)",
+                    file=sys.stderr,
+                )
+                return 1
+
     path = EMAILS_DIR / email
 
     # One file per email means the FILENAME is the key, and on a

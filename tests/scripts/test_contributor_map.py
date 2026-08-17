@@ -8,6 +8,7 @@ merges both at import time with the directory winning on duplicates.
 
 import subprocess
 import sys
+
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,10 @@ def test_loader_reads_login_from_first_noncomment_line(tmp_path):
     assert mapping == {"jane@example.com": "janedoe"}
 
 
+
+
+
+
 def test_effective_map_merges_legacy_and_directory():
     # Invariant: every legacy entry survives into the effective map unless
     # shadowed by a directory entry, and the directory contributes on top.
@@ -41,6 +46,14 @@ def test_effective_map_merges_legacy_and_directory():
     )
     for email, login in authors._load_contributor_dir().items():
         assert authors.AUTHOR_MAP[email] == login
+
+
+
+def test_casefold_exception_preserves_exact_case_attribution():
+    assert authors.AUTHOR_MAP["agent@Agents-Mac-mini.local"] == "skip-agent"
+    assert authors.AUTHOR_MAP["agent@agents-Mac-mini.local"] == "momomojo"
+
+
 
 
 # ── add_contributor.py CLI behavior ───────────────────────────────────
@@ -64,10 +77,29 @@ def test_add_creates_mapping_file(emails_dir):
     assert "# PR #999 salvage" in path.read_text()
 
 
+
+
+
+
 def test_add_refuses_login_conflicting_with_legacy_map(emails_dir):
     email, login = next(iter(authors_legacy.LEGACY_AUTHOR_MAP.items()))
     assert add_contributor(email, login + "x") == 1
     assert not (emails_dir / email).exists()
+
+
+def test_add_refuses_casefold_collision_with_existing_filename(emails_dir, capsys):
+    emails_dir.mkdir(parents=True)
+    existing = emails_dir / "person@Example.com"
+    existing.write_text("firstperson\n", encoding="utf-8")
+
+    assert add_contributor("person@example.com", "secondperson") == 1
+    assert not (emails_dir / "person@example.com").exists()
+    error = capsys.readouterr().err
+    assert "case-fold collision" in error
+    assert "person@Example.com" in error
+    assert "resolve manually" in error
+
+
 
 
 def test_add_accepts_legacy_consecutive_hyphen_login(emails_dir):
