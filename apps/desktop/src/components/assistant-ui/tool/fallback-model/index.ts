@@ -749,7 +749,25 @@ function toolPreviewTarget(toolName: string, args: Record<string, unknown>, resu
 }
 
 function toolImageUrl(args: Record<string, unknown>, result: Record<string, unknown>): string {
+  // Native multimodal tool results (phone_use, vision_analyze) carry the
+  // image in an OpenAI-style `content` part rather than a top-level field.
+  // The model transport understands that envelope, but the desktop tool-card
+  // renderer must extract the URL too or it will show only raw JSON/codicon.
+  const content = result.content
+  const contentImage = Array.isArray(content)
+    ? content.find((part): part is Record<string, unknown> => {
+        if (!isRecord(part)) return false
+        if (part.type !== 'image_url') return false
+        const imageUrl = part.image_url
+        return isRecord(imageUrl) && typeof imageUrl.url === 'string'
+      })
+    : undefined
+  const contentUrl =
+    contentImage && isRecord(contentImage.image_url) && typeof contentImage.image_url.url === 'string'
+      ? contentImage.image_url.url
+      : ''
   const candidate =
+    contentUrl ||
     firstStringField(result, ['image_url', 'url', 'path', 'image_path']) ||
     firstStringField(args, ['image_url', 'url', 'path'])
 
