@@ -288,6 +288,28 @@ def _has_replayable_thought_signature(extra_content: Any) -> bool:
     return isinstance(candidate, str) and bool(candidate.strip())
 
 
+def _normalize_responses_image_parts(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert Responses ``input_image`` parts to Chat Completions format."""
+    changed = False
+
+    def convert(value: Any) -> Any:
+        nonlocal changed
+        if isinstance(value, list):
+            return [convert(item) for item in value]
+        if isinstance(value, dict):
+            if value.get("type") == "input_image" and isinstance(value.get("image_url"), str):
+                changed = True
+                out = dict(value)
+                out["type"] = "image_url"
+                out["image_url"] = {"url": value["image_url"]}
+                return out
+            return {key: convert(item) for key, item in value.items()}
+        return value
+
+    result = convert(messages)
+    return result if changed else messages
+
+
 def _attr_or_model_extra(obj: Any, name: str) -> Any:
     """``obj.<name>``, else the same key from pydantic ``model_extra`` (some SDKs park fields there)."""
     value = getattr(obj, name, None)
@@ -449,6 +471,7 @@ class ChatCompletionsTransport(ProviderTransport):
 
         Returns the input list unchanged when nothing needs sanitizing.
         """
+        messages = _normalize_responses_image_parts(messages)
         strip_extra_content = not _model_consumes_thought_signature(kwargs.get("model"))
         # A profile declaring a native carrier type consumes replayed details by contract.
         native_type = getattr(kwargs.get("provider_profile"), "native_reasoning_details_type", None) or None
