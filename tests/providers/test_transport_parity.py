@@ -24,6 +24,27 @@ def _max_tokens_fn(n):
     return {"max_completion_tokens": n}
 
 
+def test_chat_transport_normalizes_responses_style_tool_images():
+    messages = [{
+        "role": "tool",
+        "name": "phone_use",
+        "tool_call_id": "call_1",
+        "content": [
+            {"type": "text", "text": "Phone screenshot"},
+            {"type": "input_image", "image_url": "data:image/jpeg;base64,QUJD"},
+        ],
+    }]
+
+    converted = ChatCompletionsTransport().convert_messages(messages, model="claude-opus-5")
+
+    assert converted[0]["content"][1] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/jpeg;base64,QUJD"},
+    }
+    # Normalization must not mutate the canonical conversation message.
+    assert messages[0]["content"][1]["type"] == "input_image"
+
+
 class TestNvidiaParity:
     """NVIDIA NIM: default max_tokens=16384."""
 
