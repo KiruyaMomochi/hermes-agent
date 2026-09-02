@@ -41,6 +41,25 @@ describe('buildToolView image handling', () => {
     expect(buildToolView(part({ result: { image_url: dataUrl } }), '').imageUrl).toBe(dataUrl)
   })
 
+  it('extracts data URLs from multimodal content parts', () => {
+    const dataUrl = 'data:image/jpeg;base64,AAAA'
+
+    expect(
+      buildToolView(
+        part({
+          result: {
+            _multimodal: true,
+            content: [
+              { type: 'text', text: 'Phone screenshot' },
+              { type: 'image_url', image_url: { url: dataUrl } }
+            ]
+          }
+        }),
+        ''
+      ).imageUrl
+    ).toBe(dataUrl)
+  })
+
   it('keeps remote http(s) image URLs', () => {
     const url = 'https://example.com/pic.webp'
 
