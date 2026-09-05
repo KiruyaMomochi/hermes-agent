@@ -31,17 +31,6 @@ from pathlib import Path
 import pytest
 
 
-# Both tests share the same handoff file: the leaker writes here, the
-# verifier reads here. We park it in $TMPDIR with a unique-per-run name
-# so concurrent invocations of the suite don't clobber each other.
-_HANDOFF_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "hermes-isolation-probe"
-_HANDOFF_DIR.mkdir(exist_ok=True)
-
-
-def _handoff_path_for(nonce: str) -> Path:
-    return _HANDOFF_DIR / f"grandchild-{nonce}.json"
-
-
 def _pid_alive(pid: int) -> bool:
     """POSIX: send signal 0 to probe whether ``pid`` is still alive.
 
@@ -121,9 +110,12 @@ def test_grandchild_leak_is_killed_by_runner(tmp_path: Path) -> None:
     probe_dir.mkdir()
     probe = probe_dir / "test_probe_leaker.py"
     nonce = f"{os.getpid()}-{int(time.time() * 1000)}"
-    handoff = _handoff_path_for(nonce)
-    if handoff.exists():
-        handoff.unlink()
+    # Keep the handoff inside pytest's per-test directory. A shared path
+    # under $TMPDIR can belong to another user/run and makes this test fail
+    # before it reaches the process-group cleanup assertion.
+    handoff_dir = tmp_path / "hermes-isolation-probe"
+    handoff_dir.mkdir()
+    handoff = handoff_dir / f"grandchild-{nonce}.json"
 
     probe_src = textwrap.dedent(f"""
         import json, os, subprocess, sys, time
