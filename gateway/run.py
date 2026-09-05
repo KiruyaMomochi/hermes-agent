@@ -1143,6 +1143,15 @@ def _message_timestamps_enabled(user_config: Optional[dict]) -> bool:
     return bool(mt)
 
 
+def _local_datetime(value, tz=None) -> Optional[datetime]:
+    """Coerce a stored message timestamp to a timezone-aware datetime."""
+    from gateway.message_timestamps import coerce_message_timestamp
+    epoch = coerce_message_timestamp(value, tz=tz)
+    if epoch is None:
+        return None
+    return datetime.fromtimestamp(epoch, tz=tz) if tz is not None else datetime.fromtimestamp(epoch).astimezone()
+
+
 def _build_gateway_agent_history(
     history: List[Dict[str, Any]], *, channel_prompt: Optional[str] = None,
     inject_timestamps: bool = False) -> tuple[List[Dict[str, Any]], Optional[str]]:
@@ -1150,12 +1159,16 @@ def _build_gateway_agent_history(
 
     Observed context stays out of ``conversation_history`` so consecutive-user repair can't merge it in."""
     from hermes_time import get_timezone as _get_msg_tz
-    from gateway.message_timestamps import render_user_content_with_timestamp as _render_msg_ts
+    from gateway.message_timestamps import (
+        strip_leading_message_timestamps as _strip_msg_ts,
+        inbound_timestamp_prefix as _ts_prefix,
+    )
 
     _msg_tz = _get_msg_tz()
     agent_history: List[Dict[str, Any]] = []
     observed_group_context: List[str] = []
     separate_observed_context = _uses_telegram_observed_group_context(channel_prompt)
+    _prev_user_dt = None
 
     for msg in history or []:
         role = msg.get("role")
@@ -1165,7 +1178,11 @@ def _build_gateway_agent_history(
 
         content = msg.get("content")
         if inject_timestamps and role == "user" and isinstance(content, str):
-            content = _render_msg_ts(content, msg.get("timestamp"), tz=_msg_tz)
+            clean_content, embedded_ts = _strip_msg_ts(content, tz=_msg_tz)
+            effective_ts = msg.get("timestamp") if msg.get("timestamp") is not None else embedded_ts
+            prefix = _ts_prefix(effective_ts, previous=_prev_user_dt, tz=_msg_tz)
+            content = f"{prefix} {clean_content}" if prefix else clean_content
+            _prev_user_dt = _local_datetime(effective_ts, tz=_msg_tz) or _prev_user_dt
         if separate_observed_context and msg.get("observed") and role == "user" and content:
             observed_group_context.append(str(content).strip())
             continue

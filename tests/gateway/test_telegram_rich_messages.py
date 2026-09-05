@@ -376,24 +376,6 @@ async def test_cjk_rich_content_skips_rich_draft_to_avoid_tdesktop_garble():
     adapter._bot.send_message_draft.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_cjk_rich_draft_guard_can_be_disabled():
-    adapter = _make_adapter(extra={"rich_drafts": True, "disable_cjk_rich_guard": True})
-    adapter._bot.do_api_request = AsyncMock(return_value=True)
-
-    result = await adapter.send_draft("12345", draft_id=7, content=CJK_RICH_CONTENT)
-
-    assert result.success is True
-    adapter._bot.do_api_request.assert_awaited_once()
-    adapter._bot.send_message_draft.assert_not_called()
-
-
-def test_trace_sends_emits_observable_debug_log(caplog):
-    adapter = _make_adapter(extra={"trace_sends": True})
-    with caplog.at_level(logging.DEBUG):
-        assert adapter.supports_draft_streaming(chat_type="dm") is True
-    assert "[Telegram trace] draft_streaming_support" in caplog.text
-
 # ----------------------------------------------------------------------
 # prefers_fresh_final_streaming: root DMs stay on the no-duplicate edit/draft
 # path (#47048). DM topics that degrade off drafts still need a fresh

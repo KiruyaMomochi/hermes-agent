@@ -1,40 +1,31 @@
-"""Helpers for rendering gateway message timestamps exactly once.
-
-Gateway messages need timestamps in the LLM context for temporal awareness, but
-persisted message content should stay clean so replay does not accumulate
-``[timestamp] [timestamp] ...`` prefixes across turns.
-"""
-
+"""Helpers for rendering gateway message timestamps exactly once."""
 from __future__ import annotations
-
 import re
 from datetime import datetime
 from typing import Any, Optional, Tuple
 
-
-# Leading timestamp prefix, either the current human format
-# ``[Tue 2026-04-28 13:40:53 CEST]`` or the older ISO one
-# ``[2026-04-13T17:02:06+0200]`` / ``[...+02:00]`` (human tried first).
 _TIMESTAMP_PREFIX_RE = re.compile(
     r"^\[(?:"
-    r"(?P<dow>[A-Z][a-z]{2}) "
-    r"(?P<date>\d{4}-\d{2}-\d{2}) "
-    r"(?P<time>\d{2}:\d{2}:\d{2})"
-    r"(?: (?P<tz>[A-Za-z0-9_+\-/:]+))?"
+    r"(?P<dow>[A-Z][a-z]{2}) (?P<date>\d{4}-\d{2}-\d{2}) "
+    r"(?P<time>\d{2}:\d{2}:\d{2})(?: (?P<tz>[A-Za-z0-9_+\-/:]+))?"
     r"|(?P<iso>\d{4}-\d{2}-\d{2}T[^\]]+)"
     r")\]\s*"
 )
+_SHORT_TIMESTAMP_RE = re.compile(
+    r"^\[(?:(?P<full_date>\d{4}-\d{2}-\d{2}) "
+    r"(?P<weekday>Mon|Tue|Wed|Thu|Fri|Sat|Sun) |(?P<mmdd>\d{2}-\d{2} )?)"
+    r"(?P<hhmm>\d{2}:\d{2})\]\s*"
+)
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
 def _localize(dt: datetime, tz) -> float:
-    """Epoch for ``dt``; naive values take ``tz`` if given, else the local zone."""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=tz) if tz is not None else dt.astimezone()
     return float(dt.timestamp())
 
 
 def _parse_iso(text: str, tz=None) -> Optional[float]:
-    """Parse an ISO-8601 string (incl. ``+0200`` offsets fromisoformat rejects)."""
     for parse in (datetime.fromisoformat, lambda t: datetime.strptime(t, "%Y-%m-%dT%H:%M:%S%z")):
         try:
             return _localize(parse(text), tz)
@@ -44,18 +35,24 @@ def _parse_iso(text: str, tz=None) -> Optional[float]:
 
 
 def _parse_timestamp_match(match: re.Match, tz=None) -> Optional[float]:
-    if match.group("iso"):
-        return _parse_iso(match.group("iso"), tz)
+    groups = match.groupdict()
+    if groups.get("iso"):
+        return _parse_iso(groups["iso"], tz)
+    if groups.get("full_date") and groups.get("hhmm"):
+        try:
+            return _localize(datetime.strptime(f"{groups['full_date']} {groups['hhmm']}", "%Y-%m-%d %H:%M"), tz)
+        except ValueError:
+            return None
+    if not groups.get("date"):
+        return None
     try:
-        dt = datetime.strptime(f"{match.group('date')} {match.group('time')}", "%Y-%m-%d %H:%M:%S")
+        dt = datetime.strptime(f"{groups['date']} {groups['time']}", "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None
     return _localize(dt, tz)
 
 
 def coerce_message_timestamp(ts_value: Any, tz=None) -> Optional[float]:
-    """Epoch seconds from a number, datetime, ISO string, or the gateway's bracketed
-    format; ``None`` when uninterpretable."""
     if isinstance(ts_value, (int, float)):
         return float(ts_value)
     if hasattr(ts_value, "timestamp"):
@@ -77,32 +74,55 @@ def coerce_message_timestamp(ts_value: Any, tz=None) -> Optional[float]:
 
 
 def format_message_timestamp(ts_value: Any, tz=None) -> str:
-    """Format a timestamp value as ``[Tue 2026-04-28 13:40:53 CEST]``."""
     epoch = coerce_message_timestamp(ts_value, tz=tz)
     if epoch is None:
         return ""
     dt = datetime.fromtimestamp(epoch, tz=tz) if tz is not None else datetime.fromtimestamp(epoch).astimezone()
-    return f"[{dt.strftime('%a %Y-%m-%d %H:%M:%S %Z')}]"
+    return f"[{dt:%H:%M}]"
+
+
+def _format_legacy_timestamp(ts_value: Any, tz=None) -> str:
+    epoch = coerce_message_timestamp(ts_value, tz=tz)
+    if epoch is None:
+        return ""
+    dt = datetime.fromtimestamp(epoch, tz=tz) if tz is not None else datetime.fromtimestamp(epoch).astimezone()
+    return f"[{dt:%a %Y-%m-%d %H:%M:%S %Z}]"
+
+
+def inbound_timestamp_prefix(current: Any, previous: Optional[datetime] = None, tz=None) -> str:
+    epoch = coerce_message_timestamp(current, tz=tz)
+    if epoch is None:
+        return ""
+    cur = datetime.fromtimestamp(epoch, tz=tz) if tz is not None else datetime.fromtimestamp(epoch).astimezone()
+    if previous is None or cur.date() != previous.date():
+        return f"[{cur:%Y-%m-%d} {_WEEKDAYS[cur.weekday()]} {cur:%H:%M}]"
+    if (cur - previous).total_seconds() < 60:
+        return ""
+    return f"[{cur:%H:%M}]"
 
 
 def strip_leading_message_timestamps(content: str, tz=None) -> Tuple[str, Optional[float]]:
-    """Strip leading gateway timestamp prefixes → ``(clean_content, embedded_epoch)``.
-    With several prefixes the one closest to the text wins, preserving the platform-send
-    time of legacy rows like ``[processing time] [platform time] [sender] message``."""
     if not isinstance(content, str) or not content:
         return content, None
     text, embedded_epoch = content, None
-    while (match := _TIMESTAMP_PREFIX_RE.match(text)) is not None:
-        parsed = _parse_timestamp_match(match, tz=tz)
-        if parsed is not None:
-            embedded_epoch = parsed
+    while True:
+        match = _TIMESTAMP_PREFIX_RE.match(text) or _SHORT_TIMESTAMP_RE.match(text)
+        if match is None:
+            break
+        if not (match.groupdict().get("hhmm") and not match.groupdict().get("full_date")):
+            parsed = _parse_timestamp_match(match, tz=tz)
+            if parsed is not None:
+                embedded_epoch = parsed
         text = text[match.end():]
     return text, embedded_epoch
 
 
 def render_user_content_with_timestamp(content: str, ts_value: Any = None, tz=None) -> str:
-    """Render a user message for LLM context with exactly one timestamp prefix; an
-    existing prefix is stripped and its parsed time wins over ``ts_value``."""
     clean_content, embedded_epoch = strip_leading_message_timestamps(content, tz=tz)
-    prefix = format_message_timestamp(ts_value if embedded_epoch is None else embedded_epoch, tz=tz)
+    prefix = _format_legacy_timestamp(ts_value if embedded_epoch is None else embedded_epoch, tz=tz)
     return f"{prefix} {clean_content}" if prefix and clean_content else (prefix or clean_content)
+
+
+def _parse_timestamp_prefix(text: str, tz=None) -> Optional[float]:
+    match = _TIMESTAMP_PREFIX_RE.match(text) or _SHORT_TIMESTAMP_RE.match(text)
+    return _parse_timestamp_match(match, tz=tz) if match else None
