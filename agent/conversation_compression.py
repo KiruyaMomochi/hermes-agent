@@ -3402,6 +3402,8 @@ def _run_summary_phase(
     A hard cancel restores the compressor snapshot + live list, records a stall backoff while the lease is
     still held, and aborts; any other failure releases the lease and re-raises."""
     pre_msg_count = len(messages)
+    caller_messages = messages
+    adopted_durable_history = False
     _activity_heartbeat: Optional[_CompressionActivityHeartbeat] = None
     messages_before_compression = None
 
@@ -3417,6 +3419,7 @@ def _run_summary_phase(
             _adopted_parent = _adopt_grown_durable_parent(agent, lease, messages)
             if _adopted_parent is not None:
                 messages = _adopted_parent
+                adopted_durable_history = True
                 pre_msg_count = len(messages)
                 # Estimate was for the stale snapshot; force re-derivation from adopted rows.
                 approx_tokens = 0
@@ -3436,6 +3439,8 @@ def _run_summary_phase(
             agent, messages, compress_fn, compress_kwargs, commit_fence=commit_fence,
             attempt_generation=attempt.generation, hard_cancel_event=hard_cancel_event,
         )
+        if adopted_durable_history:
+            caller_messages[:] = compressed
     except AuxiliaryExplicitCancellation:
         try:
             attempt.restore_compressor(agent.context_compressor)
