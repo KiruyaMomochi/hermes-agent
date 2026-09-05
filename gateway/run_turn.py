@@ -3072,13 +3072,14 @@ class GatewayTurnMixin:
                     if matcher(final_text) is False:
                         return False
             return True
-        if previewed:
-            has_delivered_text = getattr(consumer, "has_delivered_text", None)
-            if callable(has_delivered_text):
-                try:
-                    return bool(has_delivered_text(final_text))
-                except Exception:
-                    return False
+        # Check has_delivered_text unconditionally as fallback — a final that reached the
+        # platform through a non-preview path is still delivered.
+        has_delivered_text = getattr(consumer, "has_delivered_text", None)
+        if callable(has_delivered_text):
+            try:
+                return bool(has_delivered_text(final_text))
+            except Exception:
+                return False
         return False
 
     def _run_agent_start_turn_worker(self, turn_ctx: TurnContext, run_sync: Callable[[], Any]) -> "GatewayRunner._RunAgentWorker":
