@@ -1050,8 +1050,8 @@ class TestGetModelContextLength:
 
     @patch("agent.model_metadata.fetch_model_metadata")
     @patch("agent.models_dev.lookup_models_dev_context", return_value=None)
-    def test_non_minimax_32k_cache_is_still_respected(self, mock_models_dev, mock_fetch, tmp_path):
-        """The stale-32K invalidation must stay narrow and not touch unrelated models."""
+    def test_subminimum_32k_cache_is_dropped(self, mock_models_dev, mock_fetch, tmp_path):
+        """Sub-minimum cache entries are invalidated for every model family."""
         mock_fetch.return_value = {}
         cache_file = tmp_path / "cache.yaml"
         base_url = "http://local"
@@ -1061,7 +1061,7 @@ class TestGetModelContextLength:
                 "qwen3.5:27b",
                 base_url=base_url,
             )
-            assert result == 32768
+            assert result != 32768
 
     @patch("agent.model_metadata.fetch_model_metadata")
     @patch("agent.model_metadata.fetch_endpoint_model_metadata")
@@ -1921,8 +1921,8 @@ class TestFallbackWarning:
         assert any("totally-unknown-model-xyz" in r.getMessage() for r in warning_msgs)
         assert any("model.context_length" in r.getMessage() for r in warning_msgs)
 
-    def test_no_warning_when_cached(self, caplog):
-        """No fallback warning when the context length is found in the cache."""
+    def test_subminimum_cached_value_reaches_fallback_warning(self, caplog):
+        """A sub-minimum cached value is re-resolved rather than trusted."""
         import logging
 
         with patch(
@@ -1935,12 +1935,12 @@ class TestFallbackWarning:
                     base_url="http://127.0.0.1:1/v1",
                 )
 
-        assert result == 32_000
+        assert result == 256_000
         fallback_warnings = [
             r for r in caplog.records
             if r.levelno == logging.WARNING and "falling back" in r.getMessage()
         ]
-        assert len(fallback_warnings) == 0
+        assert len(fallback_warnings) == 1
 
 
 # =========================================================================
@@ -1972,3 +1972,4 @@ class TestOpenRouterRoutingVariantContextLength:
         assert variant_ctx == base_ctx == 2_000_000
         assert variant_ctx != DEFAULT_CONTEXT_LENGTHS.get("grok")
         assert get_model_context_length("thinkingmachines/inkling:free", provider="openrouter") == 64_000
+
