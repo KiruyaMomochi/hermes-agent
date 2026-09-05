@@ -433,6 +433,26 @@ class TelegramAdapter(BasePlatformAdapter):
         self._mention_patterns = self._compile_mention_patterns()
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
         self._disable_link_previews: bool = self._coerce_bool_extra("disable_link_previews", False)
+        # --- split replies: agent writes standalone --- lines to separate bubbles
+        split_cfg = extra.get("split_replies", {})
+        if not isinstance(split_cfg, dict):
+            split_cfg = {"enabled": split_cfg}
+        split_enabled = split_cfg.get("enabled", False)
+        self._split_replies_enabled = (
+            split_enabled
+            if isinstance(split_enabled, bool)
+            else str(split_enabled).strip().lower() in {"1", "true", "yes", "on"}
+        )
+        try:
+            split_delay_ms = float(split_cfg.get("delay_between_ms", 350))
+        except (TypeError, ValueError):
+            split_delay_ms = 350.0
+        self._split_replies_delay_seconds = max(0.0, min(split_delay_ms, 5000.0)) / 1000.0
+        try:
+            split_max_parts = int(split_cfg.get("max_parts", 8))
+        except (TypeError, ValueError):
+            split_max_parts = 8
+        self._split_replies_max_parts = max(2, min(split_max_parts, 20))
         # Bot API 10.1 Rich Messages render what MarkdownV2 degrades (tables, task lists, <details>, block
         # math). Opt-in: current clients make rich messages hard to copy as plain text. rich_drafts is a
         # separate opt-in (Desktop can leave rich draft frames overlaid): off keeps native draft transport
@@ -3350,6 +3370,52 @@ class TelegramAdapter(BasePlatformAdapter):
         # Skip whitespace-only text to prevent Telegram 400 empty-text errors.
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
+
+        # --- split replies: separate bubbles on standalone --- lines
+        split_metadata = dict(metadata or {})
+        if (
+            getattr(self, "_split_replies_enabled", False)
+            and not split_metadata.get("_telegram_split_part")
+        ):
+            from plugins.platforms.telegram.telegram_split_replies import (
+                split_reply_delimited,
+                split_reply_delay_seconds,
+            )
+
+            parts = split_reply_delimited(
+                content, max_parts=getattr(self, "_split_replies_max_parts", 8)
+            )
+            if len(parts) > 1:
+                message_ids: list[str] = []
+                split_metadata["_telegram_split_part"] = True
+                for index, (part, dash_count) in enumerate(parts):
+                    if index:
+                        delay = split_reply_delay_seconds(
+                            getattr(self, "_split_replies_delay_seconds", 0.0), dash_count
+                        )
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                    part_reply_to = (
+                        reply_to if index == 0 or self._reply_to_mode == "all" else None
+                    )
+                    result = await self.send(chat_id, part, part_reply_to, split_metadata)
+                    if not result.success:
+                        return result
+                    raw_ids = (
+                        result.raw_response.get("message_ids", [])
+                        if isinstance(result.raw_response, dict)
+                        else []
+                    )
+                    if raw_ids:
+                        message_ids.extend(str(v) for v in raw_ids)
+                    elif result.message_id is not None:
+                        message_ids.append(str(result.message_id))
+                return SendResult(
+                    success=True,
+                    message_id=message_ids[-1] if message_ids else None,
+                    raw_response={"message_ids": message_ids},
+                )
+
         error_types = self._telegram_error_types()
         try:
             # Bot API 10.1 rich fast-path; falls through to legacy MarkdownV2 on permanent/capability
@@ -6536,6 +6602,8 @@ def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:
     for _key in ("guest_mode", "disable_link_previews", "observe_unmentioned_group_messages", "free_response_topics"):
         if _key in telegram_cfg:
             extras.setdefault(_key, telegram_cfg[_key])
+    if "split_replies" in telegram_cfg:
+        extras.setdefault("split_replies", telegram_cfg["split_replies"])
     # Pass through telegram-specific extra keys but EXCLUDE generic shared-config keys: _merge_platform_map
     # already applied top-level-over-nested precedence and re-emitting them via dict.update() would undo it.
     _GENERIC_MERGE_KEYS = {
