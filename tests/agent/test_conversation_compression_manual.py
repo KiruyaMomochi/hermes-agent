@@ -5,11 +5,12 @@ from __future__ import annotations
 import copy
 import os
 import threading
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent.conversation_compression_manual import compress_now, parse_compress_args
+from agent.conversation_compression_manual import CompressResult, compress_now, parse_compress_args
 
 
 def _history():
@@ -105,6 +106,36 @@ def test_windowless_gate_is_gateway_only_so_in_process_surfaces_still_reach_comp
     gateway = compress_now(agent, history, parse_compress_args(""), system_message="", skip_without_window=True)
     assert gateway.status == "nothing_to_do" and gateway.after_messages == history
     agent._compress_context.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_gateway_reports_context_engine_noop_without_persisting(monkeypatch):
+    from gateway.run import GatewayRunner
+
+    history = _history()
+    request = parse_compress_args("")
+    result = CompressResult(
+        "compressed", history, list(history), 100, 100, request,
+        summary={"noop": True, "headline": "Compression skipped: context engine made no changes (6 messages)",
+                 "token_line": "Approx request size: ~100 tokens (unchanged)", "note": None},
+    )
+    monkeypatch.setattr("agent.conversation_compression_manual.compress_now", lambda *_a, **_k: result)
+    finalize = MagicMock()
+    monkeypatch.setattr("agent.conversation_compression.finalize_context_engine_compression_notification", finalize)
+    gateway = GatewayRunner.__new__(GatewayRunner)
+    gateway._session_key_for_source = MagicMock(return_value="telegram:chat")
+    gateway._resolve_session_agent_runtime = MagicMock(return_value=("model", {"api_key": "key"}))
+    gateway._build_manual_compression_agent = AsyncMock(return_value=MagicMock())
+    gateway._run_in_executor_with_context = AsyncMock(side_effect=lambda fn: fn())
+    gateway._persist_manual_compression = AsyncMock()
+    gateway._evict_cached_agent = MagicMock()
+    gateway._cleanup_agent_resources_off_loop = AsyncMock()
+    reply = await gateway._run_manual_compression(
+        SimpleNamespace(platform=None), SimpleNamespace(session_id="sid"), history, request,
+    )
+    assert "context engine made no changes" in reply
+    gateway._persist_manual_compression.assert_not_awaited()
+    finalize.assert_called_once_with(gateway._build_manual_compression_agent.return_value, committed=False)
 
 
 def _coro(value):
