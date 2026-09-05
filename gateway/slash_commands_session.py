@@ -583,6 +583,12 @@ class GatewaySessionCommandsMixin:
             if _lock_skipped is True or isinstance(_lock_skipped, str):
                 from agent.manual_compression_feedback import describe_compression_lock_skip
                 return describe_compression_lock_skip(_lock_skipped)
+            if compressed == head and not getattr(compressor, "_last_compress_aborted", False):
+                summary = summarize_manual_compression(
+                    msgs, msgs, approx_tokens, approx_tokens,
+                    compression_state=compressor,
+                )
+                return "\n".join([f"🗜️ {summary['headline']}", summary["token_line"]])
             if partial and tail:
                 compressed = rejoin_compressed_head_and_tail(compressed, tail)
             await self._persist_manual_compression(tmp_agent, session_entry, source, compressed)

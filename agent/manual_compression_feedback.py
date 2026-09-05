@@ -66,7 +66,10 @@ def summarize_manual_compression(
             f"and removed {dropped_count} message(s)."
         )
     elif noop:
-        headline = f"No changes from compression: {before_count} messages"
+        headline = (
+            "Compression skipped: context engine made no changes "
+            f"({before_count} messages)"
+        )
     else:
         headline = f"Compressed: {before_count} → {after_count} messages"
         if after_count < before_count and after_tokens > before_tokens:
