@@ -754,6 +754,59 @@ PLATFORM_HINTS = {
     # 'desktop' or 'tui'). If a real WebUI chat surface ships, write a hint from its actual renderer.
 }
 
+
+def _load_prompt_overrides() -> dict:
+    """Load prompt override values from HERMES_HOME/prompt_overrides.yaml.
+
+    Returns a dict mapping constant names to replacement strings.
+    Keys set to null/None in YAML will cause the constant to become empty
+    string (effectively removing that section from the prompt).
+
+    PLATFORM_HINTS overrides are nested: platform_hints.telegram, etc.
+    """
+    try:
+        overrides_path = Path(get_hermes_home()) / "prompt_overrides.yaml"
+        if not overrides_path.is_file():
+            return {}
+        import yaml
+        with open(overrides_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except Exception as exc:
+        logger.debug("Failed to load prompt_overrides.yaml: %s", exc)
+        return {}
+
+
+_PROMPT_OVERRIDES = _load_prompt_overrides()
+
+# Apply overrides to module-level constants. Any ALL_CAPS constant defined before
+# this point (excluding private _NAMES and built-in types) can be overridden.
+if _PROMPT_OVERRIDES:
+    _g = globals()
+    _overridable = [
+        name for name in _g
+        if name.isupper() and not name.startswith("_") and isinstance(_g[name], str)
+    ]
+    for _name in _overridable:
+        if _name in _PROMPT_OVERRIDES:
+            _val = _PROMPT_OVERRIDES[_name]
+            # null in YAML → remove the section entirely
+            _g[_name] = _val if _val is not None else ""
+
+    # PLATFORM_HINTS: allow per-platform overrides via nested dict
+    if "PLATFORM_HINTS" in _PROMPT_OVERRIDES:
+        _ph_overrides = _PROMPT_OVERRIDES["PLATFORM_HINTS"]
+        if isinstance(_ph_overrides, dict):
+            for _platform, _hint in _ph_overrides.items():
+                if _hint is None:
+                    PLATFORM_HINTS.pop(_platform, None)
+                else:
+                    PLATFORM_HINTS[_platform] = _hint
+    del _g
+
+
 # Telegram rich-messages extension — injected only with
 # ``platforms.telegram.extra.rich_messages: true`` (gateway.* or top-level).
 # NOTE: a "webui" hint lived here until 2026-08-29. It was a ghost (verified in the all-platform hint audit,
