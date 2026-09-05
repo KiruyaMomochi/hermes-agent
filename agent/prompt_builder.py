@@ -189,6 +189,42 @@ HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS = (
 )
 
 
+# Components are independently replaceable via prompt_overrides.yaml; runtime flags
+# still select the frame and skill routing before composition.
+MEMORY_GUIDANCE_FRAME = (
+    "You have persistent memory, carried across sessions and loaded "
+    "into each new session's context; the memory tool's schema defines what belongs there. "
+)
+USER_PROFILE_GUIDANCE_FRAME = (
+    "You have a persistent user profile, carried across sessions and "
+    "loaded into each new session's context; save durable facts about the user with the "
+    "memory tool (target='user') — the built-in notes store is disabled, so never target='memory'. "
+)
+MEMORY_GUIDANCE_SKILL_ROUTING = (
+    "Skills come first: when you learn something while doing a task — a "
+    "procedure, a pitfall, and the user's preferences and corrections "
+    "for that kind of work — record it in the skill you used or built "
+    "for the task (skill_manage), where it loads only when relevant. "
+)
+MEMORY_GUIDANCE_NO_SKILL_ROUTING = (
+    "Task-specific knowledge — procedures, pitfalls, and the user's preferences "
+    "and corrections for that kind of work — belongs in skills, not in memory, "
+    "even when skill writing is unavailable. "
+)
+MEMORY_GUIDANCE_BODY = (
+    "Memory is the narrow exception for facts that apply to EVERY "
+    "session regardless of task (who the user is, environment facts, "
+    "standing conventions with no task home); it has a hard character "
+    "budget, so when it fills, replace or consolidate stale entries "
+    "rather than skipping the save. Write entries as declarative facts, "
+    "not instructions to yourself: 'User prefers concise responses' ✓ — "
+    "'Always respond concisely' ✗ (imperative phrasing gets re-read as "
+    "a directive in later sessions and can override the user's current "
+    "request). A fact stale within a week belongs in session history; "
+    "procedures and workflows belong in skills."
+)
+
+
 # Keep the every-session memory scope even when task knowledge cannot be saved as a skill.
 def build_memory_guidance(
     memory_enabled: bool = True, profile_enabled: bool = True, *, skill_manage_available: bool = True,
@@ -197,41 +233,17 @@ def build_memory_guidance(
     if not memory_enabled and not profile_enabled:
         return ""
     if memory_enabled:
-        frame = (
-            "You have persistent memory, carried across sessions and loaded "
-            "into each new session's context; the memory tool's schema defines what belongs there. "
-        )
+        frame = MEMORY_GUIDANCE_FRAME
     else:
-        frame = (
-            "You have a persistent user profile, carried across sessions and "
-            "loaded into each new session's context; save durable facts about the user with the "
-            "memory tool (target='user') — the built-in notes store is disabled, so never target='memory'. "
-        )
+        frame = USER_PROFILE_GUIDANCE_FRAME
     skill_routing = (
-        "Skills come first: when you learn something while doing a task — a "
-        "procedure, a pitfall, and the user's preferences and corrections "
-        "for that kind of work — record it in the skill you used or built "
-        "for the task (skill_manage), where it loads only when relevant. "
-        if skill_manage_available else
-        "Task-specific knowledge — procedures, pitfalls, and the user's preferences "
-        "and corrections for that kind of work — belongs in skills, not in memory, "
-        "even when skill writing is unavailable. "
+        MEMORY_GUIDANCE_SKILL_ROUTING if skill_manage_available else MEMORY_GUIDANCE_NO_SKILL_ROUTING
     )
-    return frame + skill_routing + (
-        "Memory is the narrow exception for facts that apply to EVERY "
-        "session regardless of task (who the user is, environment facts, "
-        "standing conventions with no task home); it has a hard character "
-        "budget, so when it fills, replace or consolidate stale entries "
-        "rather than skipping the save. Write entries as declarative facts, "
-        "not instructions to yourself: 'User prefers concise responses' ✓ — "
-        "'Always respond concisely' ✗ (imperative phrasing gets re-read as "
-        "a directive in later sessions and can override the user's current "
-        "request). A fact stale within a week belongs in session history; "
-        "procedures and workflows belong in skills."
-    )
+    return frame + skill_routing + MEMORY_GUIDANCE_BODY
 
 
-# Legacy aliases still imported by call sites and tests.
+# Legacy aliases still imported by call sites and tests. Live prompt assembly uses
+# build_memory_guidance() and its component overrides, not these static snapshots.
 MEMORY_GUIDANCE = build_memory_guidance(True, True)
 USER_PROFILE_GUIDANCE = build_memory_guidance(False, True)
 
@@ -263,6 +275,25 @@ SKILLS_GUIDANCE = (
     "reload it with skill_view(name='...') before acting on anything that depends on it. After reloading, ignore any "
     "remaining `[SKILL_PRUNED]` markers for that same skill; they are historical artifacts of earlier compactions."
 )
+
+# Header/footer around the <available_skills> index. Module-level so prompt_overrides.yaml can replace them.
+# ``{basic_tools}`` is substituted at render time ("web_search or terminal", or "terminal" without web tools).
+SKILLS_INDEX_HEADER = (
+    "## Skills\n"
+    "Before replying, scan the skills below. If a skill matches or is even partially relevant to your "
+    "task, you MUST load it with skill_view(name) and follow its instructions. Err on the side of "
+    "loading — it is always better to have context you don't need than to miss critical steps, pitfalls, "
+    "or established workflows. Skills contain specialized knowledge — API endpoints, tool-specific "
+    "commands, and proven workflows that outperform general-purpose approaches. Load the skill "
+    "even if you think you could handle the task with basic tools like {basic_tools}. "
+    "Skills also encode the user's preferred approach, conventions, and quality standards for tasks like "
+    "code review, planning, and testing — load them even for tasks you already know how to do, because "
+    "the skill defines how it should be done here.\n"
+    "If a skill has issues, fix it with skill_manage(action='patch').\n"
+    "After difficult/iterative tasks, offer to save as a skill. If a skill you loaded was missing steps, "
+    "had wrong commands, or needed pitfalls you discovered, update it before finishing."
+)
+SKILLS_INDEX_FOOTER = "Only proceed without loading a skill if genuinely none are relevant to the task."
 
 KANBAN_GUIDANCE = (
     "# Kanban task execution protocol\n"
@@ -841,6 +872,59 @@ PLATFORM_HINTS = {
     # No "webui" hint on purpose: nothing constructs platform="webui" (the dashboard chat resolves to
     # 'desktop' or 'tui'). If a real WebUI chat surface ships, write a hint from its actual renderer.
 }
+
+
+def _load_prompt_overrides() -> dict:
+    """Load prompt override values from HERMES_HOME/prompt_overrides.yaml.
+
+    Returns a dict mapping constant names to replacement strings.
+    Keys set to null/None in YAML will cause the constant to become empty
+    string (effectively removing that section from the prompt).
+
+    PLATFORM_HINTS overrides are nested: platform_hints.telegram, etc.
+    """
+    try:
+        overrides_path = Path(get_hermes_home()) / "prompt_overrides.yaml"
+        if not overrides_path.is_file():
+            return {}
+        import yaml
+        with open(overrides_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except Exception as exc:
+        logger.debug("Failed to load prompt_overrides.yaml: %s", exc)
+        return {}
+
+
+_PROMPT_OVERRIDES = _load_prompt_overrides()
+
+# Apply overrides to module-level constants. Any ALL_CAPS constant defined before
+# this point (excluding private _NAMES and built-in types) can be overridden.
+if _PROMPT_OVERRIDES:
+    _g = globals()
+    _overridable = [
+        name for name in _g
+        if name.isupper() and not name.startswith("_") and isinstance(_g[name], str)
+    ]
+    for _name in _overridable:
+        if _name in _PROMPT_OVERRIDES:
+            _val = _PROMPT_OVERRIDES[_name]
+            # null in YAML → remove the section entirely
+            _g[_name] = _val if _val is not None else ""
+
+    # PLATFORM_HINTS: allow per-platform overrides via nested dict
+    if "PLATFORM_HINTS" in _PROMPT_OVERRIDES:
+        _ph_overrides = _PROMPT_OVERRIDES["PLATFORM_HINTS"]
+        if isinstance(_ph_overrides, dict):
+            for _platform, _hint in _ph_overrides.items():
+                if _hint is None:
+                    PLATFORM_HINTS.pop(_platform, None)
+                else:
+                    PLATFORM_HINTS[_platform] = _hint
+    del _g
+
 
 # Telegram rich-messages extension — injected only with
 # ``platforms.telegram.extra.rich_messages: true`` (gateway.* or top-level).
@@ -1441,25 +1525,14 @@ def _render_skills_index(
             + "\n<available_skills>\n" + "\n".join(index_lines) + "\n</available_skills>"
             + hidden_note
         )
+    header = SKILLS_INDEX_HEADER.replace("{basic_tools}", _basic_tools).rstrip("\n")
+    footer = SKILLS_INDEX_FOOTER.strip()
     return (
-        "## Skills\n"
-        "Before replying, scan the skills below. If a skill matches or is even partially relevant to your "
-        "task, you MUST load it with skill_view(name) and follow its instructions. Err on the side of "
-        "loading — it is always better to have context you don't need than to miss critical steps, pitfalls, "
-        "or established workflows. Skills contain specialized knowledge — API endpoints, tool-specific "
-        "commands, and proven workflows that outperform general-purpose approaches. Load the skill "
-        f"even if you think you could handle the task with basic tools like {_basic_tools}. "
-        "Skills also encode the user's preferred approach, conventions, and quality standards for tasks like "
-        "code review, planning, and testing — load them even for tasks you already know how to do, because "
-        "the skill defines how it should be done here.\n"
-        "If a skill has issues, fix it with skill_manage(action='patch').\n"
-        "After difficult/iterative tasks, offer to save as a skill. If a skill you loaded was missing steps, "
-        "had wrong commands, or needed pitfalls you discovered, update it before finishing.\n"
-        "\n"
-        "<available_skills>\n"
+        (header + "\n\n" if header else "")
+        + "<available_skills>\n"
         + "\n".join(index_lines) + "\n"
-        "</available_skills>\n\n"
-        "Only proceed without loading a skill if genuinely none are relevant to the task."
+        "</available_skills>"
+        + ("\n\n" + footer if footer else "")
         + hidden_note
     )
 
