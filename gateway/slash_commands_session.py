@@ -549,13 +549,24 @@ class GatewaySessionCommandsMixin:
         try:
             # Not a bare run_in_executor: the profile secret scope is a contextvar the default
             # executor hop would drop, failing aux-client credential resolution closed.
-            result = await self._run_in_executor_with_context(
-                lambda: compress_now(tmp_agent, msgs, request, system_message="", skip_without_window=True))
-            if result.status == "nothing_to_do":
-                return t("gateway.compress.nothing_to_do")
-            if result.status != "compressed":
-                return "\n".join(render_compress_result(result))
-            await self._persist_manual_compression(tmp_agent, session_entry, source, result.after_messages)
+            compressed, _ = await self._run_in_executor_with_context(
+                lambda: tmp_agent._compress_context(
+                    head, "", approx_tokens=approx_tokens, focus_topic=focus_topic, force=True,
+                    defer_context_engine_notification=True))
+            # A held compression lock returns unchanged; say so instead of the misleading no-op text.
+            _lock_skipped = getattr(tmp_agent, "_compression_skipped_due_to_lock", None)
+            if _lock_skipped is True or isinstance(_lock_skipped, str):
+                from agent.manual_compression_feedback import describe_compression_lock_skip
+                return describe_compression_lock_skip(_lock_skipped)
+            if compressed == head and not getattr(compressor, "_last_compress_aborted", False):
+                summary = summarize_manual_compression(
+                    msgs, msgs, approx_tokens, approx_tokens,
+                    compression_state=compressor,
+                )
+                return "\n".join([f"🗜️ {summary['headline']}", summary["token_line"]])
+            if partial and tail:
+                compressed = rejoin_compressed_head_and_tail(compressed, tail)
+            await self._persist_manual_compression(tmp_agent, session_entry, source, compressed)
             finalize_context_engine_compression_notification(tmp_agent, committed=True)
             compressor = tmp_agent.context_compressor
             summary = result.summary
