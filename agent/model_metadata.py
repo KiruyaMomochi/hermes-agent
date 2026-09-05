@@ -1643,6 +1643,8 @@ def _validate_cached_context_length(model: str, base_url: str, cached: int, is_b
     # third-party metadata; pre-catalog leftovers persisted a shorter catch-all (see _PRE_CATALOG_STALE_KEYS).
     drop_rules = (
         (cached <= 0, logger.warning, "Dropping non-positive cache entry %s@%s -> %s; re-resolving", cached),
+        (cached < MINIMUM_CONTEXT_LENGTH, logger.info,
+         "Dropping sub-minimum cached context entry %s@%s -> %s; re-probing", f"{cached:,}"),
         (cached <= 32768 and _model_name_suggests_stale_32k_underreport(model), logger.info,
          "Dropping stale cached context entry %s@%s -> %s (known 32K underreport); re-resolving via hardcoded defaults", f"{cached:,}"),
         (_stale_pre_catalog_cache_entry(model, cached), logger.info,
