@@ -563,6 +563,8 @@ class GatewaySessionCommandsMixin:
                 return t("gateway.compress.nothing_to_do")
             if result.status != "compressed":
                 return "\n".join(render_compress_result(result))
+            if result.summary and result.summary.get("noop"):
+                return "\n".join(render_compress_result(result))
             await self._persist_manual_compression(tmp_agent, session_entry, source, result.after_messages)
             finalize_context_engine_compression_notification(tmp_agent, committed=True)
             compressor = tmp_agent.context_compressor
