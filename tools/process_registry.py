@@ -13,6 +13,7 @@ import platform
 import shlex
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -149,7 +150,7 @@ def _systemd_run_user_scope_available() -> bool:
     """True if ``systemd-run --user --scope`` can create a cgroup.
     ``shutil.which`` alone is insufficient: system services and containers may lack
     the user D-Bus bus even with the binary on PATH (every spawn would fail with
-    ``Failed to connect to user bus``), so a cheap ``/bin/true`` probe is run and cached."""
+    ``Failed to connect to user bus``), so a cheap probe is run and cached."""
     global _SYSTEMD_SCOPE_AVAILABLE, _SYSTEMD_SCOPE_PROBED_AT
     verdict = _systemd_scope_cached()
     if verdict is not None:
@@ -170,7 +171,8 @@ def _systemd_run_user_scope_available() -> bool:
                     # Unique unit avoids collisions; the timeout bounds D-Bus.
                     probe_unit = f"hermes-probe-scope-{os.getpid()}-{uuid.uuid4().hex[:8]}"
                     result = subprocess.run(
-                        _systemd_scope_argv(binary, probe_unit, "/bin/true"), capture_output=True, timeout=3,
+                        _systemd_scope_argv(binary, probe_unit, sys.executable, "-c", "pass"),
+                        capture_output=True, timeout=3,
                     )
                     available = result.returncode == 0
                     if not available:

@@ -2342,6 +2342,28 @@ class TestSystemdCgroupIsolation:
         assert session.id in registry._finished
         assert session.id not in registry._running
 
+    def test_systemd_probe_uses_running_python_not_fhs_true(self, monkeypatch):
+        """The scope probe must not assume an FHS ``/bin/true`` exists."""
+        import sys
+        import tools.process_registry as pr
+
+        monkeypatch.setattr(pr, "_SYSTEMD_SCOPE_AVAILABLE", None)
+        probe_calls = []
+
+        def fake_probe_run(argv, **kwargs):
+            probe_calls.append((list(argv), kwargs))
+            return subprocess.CompletedProcess(args=argv, returncode=0)
+
+        monkeypatch.setattr("shutil.which", lambda name: "/nix/store/systemd-run")
+        monkeypatch.setattr("subprocess.run", fake_probe_run)
+
+        assert pr._systemd_run_user_scope_available() is True
+        assert len(probe_calls) == 1
+        argv, kwargs = probe_calls[0]
+        assert argv[argv.index("--") + 1:] == [sys.executable, "-c", "pass"]
+        assert "/bin/true" not in argv
+        assert kwargs == {"capture_output": True, "timeout": 3}
+
     def test_systemd_run_user_scope_available_caches_after_probe(
         self, registry, monkeypatch
     ):
@@ -2349,7 +2371,6 @@ class TestSystemdCgroupIsolation:
         not re-probe (and must return the same value)."""
         import tools.process_registry as pr
 
-        # Reset the cache.
         monkeypatch.setattr(pr, "_SYSTEMD_SCOPE_AVAILABLE", None)
         probe_calls = []
 
