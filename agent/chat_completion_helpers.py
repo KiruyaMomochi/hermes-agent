@@ -1802,11 +1802,16 @@ def _is_anthropic_wire_url(url: str) -> bool:
 
 
 def _fallback_api_mode_hint(fb: dict, fb_provider: str, fb_base_url_hint: Optional[str]) -> tuple[bool, str]:
-    """(explicit, api_mode) for a fallback entry from its ORIGINAL base_url: resolve_provider_client()
-    rewrites a dual-surface /anthropic base to /v1, losing the Anthropic wire signal. An explicit
-    ``api_mode`` always wins (even "chat_completions") and suppresses later re-detection;
-    ``provider: anthropic`` without a base_url still resolves to anthropic_messages."""
-    explicit = str(fb.get("api_mode") or "").strip()
+    """(explicit, api_mode) for a fallback entry, including named custom-provider config."""
+    explicit = (fb.get("api_mode") or fb.get("transport") or "").strip() or None
+    if not explicit:
+        try:
+            from hermes_cli.runtime_provider import _get_named_custom_provider
+            custom_entry = _get_named_custom_provider(fb_provider)
+            if custom_entry:
+                explicit = (custom_entry.get("api_mode") or custom_entry.get("transport") or "").strip() or None
+        except Exception:
+            explicit = None
     if explicit:
         return True, explicit
     if fb_provider == "anthropic" or (fb_base_url_hint and _is_anthropic_wire_url(fb_base_url_hint)):
