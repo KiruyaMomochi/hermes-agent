@@ -1965,6 +1965,8 @@ def _validate_cached_context_length(model: str, base_url: str, cached: int, *, a
     # Drop invalid rows, known 32K underreports, pre-catalog leftovers, and xAI's old 2M Grok 4.20.
     drop_rules = (
         (cached <= 0, logger.warning, "Dropping non-positive cache entry %s@%s -> %s; re-resolving", cached),
+        (cached < MINIMUM_CONTEXT_LENGTH, logger.info,
+         "Dropping sub-minimum cached context entry %s@%s -> %s; re-probing", f"{cached:,}"),
         (cached <= 32768 and _model_name_suggests_stale_32k_underreport(model), logger.info,
          "Dropping stale cached context entry %s@%s -> %s (known 32K underreport); re-resolving via hardcoded defaults", f"{cached:,}"),
         (_stale_pre_catalog_cache_entry(model, cached), logger.info,
