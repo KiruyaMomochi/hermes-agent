@@ -640,6 +640,10 @@ class TestOpenVikingAutoRecallPrefetch:
     @pytest.mark.parametrize("peer", ["", "hermes"])
     def test_prefetch_e2e_sends_limit_and_reads_l2_content(self, monkeypatch, peer):
         records = {"searches": [], "reads": [], "listings": [], "headers": []}
+        monkeypatch.setattr(
+            "plugins.memory.openviking._load_hermes_openviking_config",
+            lambda: {"session_start_profile": True, "session_start_memories": True},
+        )
 
         class Handler(BaseHTTPRequestHandler):
             def _send_json(self, payload):

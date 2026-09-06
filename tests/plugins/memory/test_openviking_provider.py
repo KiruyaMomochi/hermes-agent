@@ -1448,8 +1448,13 @@ def test_session_start_token_estimator_matches_shared_openviking_contract():
     assert provider._estimate_tokens("设置ab") == 4
 
 
-def test_prefetch_prepends_session_start_memory_context_once_per_session():
+def test_prefetch_prepends_session_start_memory_context_once_per_session(monkeypatch):
     provider = _make_prefetch_provider()
+    monkeypatch.setattr(
+        openviking_module,
+        "_load_hermes_openviking_config",
+        lambda: {"session_start_profile": True, "session_start_memories": True},
+    )
     calls = _mock_session_start_reads(
         provider,
         {
@@ -1514,8 +1519,13 @@ def test_prefetch_prepends_session_start_memory_context_once_per_session():
     assert provider._search_prefetch_context.call_count == 2
 
 
-def test_session_start_reuses_one_fallback_user_after_status_probe_failure():
+def test_session_start_reuses_one_fallback_user_after_status_probe_failure(monkeypatch):
     provider = _make_prefetch_provider()
+    monkeypatch.setattr(
+        openviking_module,
+        "_load_hermes_openviking_config",
+        lambda: {"session_start_profile": True, "session_start_memories": True},
+    )
     provider._user = "configured-user"
     provider._client._user = "configured-user"
     provider._search_prefetch_context = MagicMock(return_value="")
@@ -1556,8 +1566,13 @@ def test_session_start_reuses_one_fallback_user_after_status_probe_failure():
     )
 
 
-def test_prefetch_reinjects_after_in_place_compression_same_session():
+def test_prefetch_reinjects_after_in_place_compression_same_session(monkeypatch):
     provider = _make_prefetch_provider()
+    monkeypatch.setattr(
+        openviking_module,
+        "_load_hermes_openviking_config",
+        lambda: {"session_start_profile": True, "session_start_memories": True},
+    )
     provider._session_id = "sid-123"
     profiles = iter(["Profile before compression.", "Profile after compression."])
 
