@@ -13,6 +13,7 @@ from contextvars import ContextVar, Token
 from typing import Iterator, Mapping, MutableMapping, overload
 
 _DELEGATED_CHILD_CONTEXT: ContextVar[bool] = ContextVar("hermes_delegated_child_context", default=False)
+_DELEGATED_PROMPT_HOME: ContextVar[str | None] = ContextVar("hermes_delegated_prompt_home", default=None)
 # Any in-process execution that is NOT the dispatcher-owned worker (cron jobs). Kept separate
 # so delegate_task-specific behaviour (subprocess env scrubbing, its error strings) is unchanged.
 _NON_DISPATCHER_OWNED_CONTEXT: ContextVar[bool] = ContextVar("hermes_non_dispatcher_owned_context", default=False)
@@ -26,18 +27,27 @@ KANBAN_ENV_KEYS: tuple[str, ...] = (
 
 
 @contextmanager
-def delegated_child_context(session_id: str | None = None) -> Iterator[None]:
+def delegated_child_context(session_id: str | None = None, *, profile_home=None) -> Iterator[None]:
     """Mark child execution and isolate its task-local session identity. Even a context
     entered without an id must restore the parent's session ContextVar (child
     construction calls ``set_current_session_id``)."""
     token = _DELEGATED_CHILD_CONTEXT.set(True)
+    from hermes_constants import hermes_home_key
+    prompt_token = _DELEGATED_PROMPT_HOME.set(hermes_home_key(profile_home) if profile_home is not None else None)
     try:
         from gateway.session_context import scoped_current_session_id  # lazy: it calls is_delegated_child_context()
 
         with scoped_current_session_id(session_id):
             yield
     finally:
+        _DELEGATED_PROMPT_HOME.reset(prompt_token)
         _DELEGATED_CHILD_CONTEXT.reset(token)
+
+
+def tool_prompt_overrides_allowed() -> bool:
+    """Ordinary delegate children use defaults; explicitly profile-bound children own their wording."""
+    from hermes_constants import get_hermes_home, hermes_home_key
+    return not is_delegated_child_context() or _DELEGATED_PROMPT_HOME.get() == hermes_home_key(get_hermes_home())
 
 
 def is_delegated_child_context() -> bool:

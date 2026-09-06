@@ -45,7 +45,8 @@ def _build_image_ref_message(user_text: str, image_paths: list[str]) -> str:
     text = user_text or ""
     if prefix:
         return f"{prefix}\n\n{text}" if text else prefix
-    return text or "What do you see in this image?"
+    from agent.prompt_builder import IMAGE_ONLY_CAPTION
+    return text or IMAGE_ONLY_CAPTION
 
 
 def _build_persist_message_with_image_refs(user_text: str, image_paths: list[str]) -> str:
@@ -158,7 +159,8 @@ def _user_image_display_text(content: Any) -> str | None:
     from agent.context_references import format_reference_value
     if "\n\n[Image attached at: " in text:
         caption, hints = text.split("\n\n[Image attached at: ", 1)
-        if not caption or caption == "What do you see in this image?":
+        from agent.prompt_builder import IMAGE_ONLY_CAPTION
+        if not caption or caption == IMAGE_ONLY_CAPTION:
             return None
         hints, placeholders = _strip_trailing_screenshot_placeholders(hints)
         matches = [_IMAGE_HINT_RE.fullmatch(line) for line in ("[Image attached at: " + hints).split("\n")]

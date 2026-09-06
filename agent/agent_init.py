@@ -1016,7 +1016,7 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
     agent.disabled_toolsets = disabled_toolsets  # so the tool_search bridge and delegate children drop them too
     agent._tool_snapshot_selection = tool_selection_key(enabled_toolsets, disabled_toolsets)  # tools[] freeze gate
     agent.tools = agent_tool_surface(agent, model_tools.get_tool_definitions(
-        enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets, quiet_mode=agent.quiet_mode) or [])
+        enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets, quiet_mode=agent.quiet_mode, skip_tool_search_assembly=True) or [])
     agent.valid_tool_names = {tool["function"]["name"] for tool in agent.tools} if agent.tools else set()
     # Kanban guidance is session-static for the dispatcher-owned worker only. Profiles may
     # expose kanban_show interactively, and children/cron runs inherit the env var, without
@@ -2148,7 +2148,6 @@ def init_agent(
     # Models whose Anthropic organization answered a fast request with a fast-mode limit of 0;
     # agent.fast_mode stops sending ``speed`` to them for the rest of the session.
     agent._fast_mode_unavailable_models = set()
-
     _init_prompt_cache_config(agent)
     _init_turn_state(agent, run_budget_seconds)
     _set_defaults(agent, _STREAM_STATE)
@@ -2176,8 +2175,8 @@ def init_agent(
             type(exc).__name__,
         )
         _agent_cfg = {}
-
     _apply_display_config(agent, _agent_cfg, platform)
+    _base_tool_count = len(agent.tools)
     _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=memory_manager)
     _apply_agent_section(agent, _agent_cfg)
     cs = _parse_compression_config(agent, _agent_cfg)
@@ -2190,6 +2189,8 @@ def init_agent(
     _enforce_minimum_context(agent)
     _warn_nonagentic_hermes_model(agent)
     _inject_context_engine_tools(agent)
+    from tools.prompt_text import agent_tool_text, apply_tool_text
+    agent.tools[_base_tool_count:] = apply_tool_text(agent.tools[_base_tool_count:], agent_tool_text(agent))
     _init_usage_state(agent)
     _clamp_compressor_to_ollama_num_ctx(agent)
     _emit_compression_summary(agent, cs)

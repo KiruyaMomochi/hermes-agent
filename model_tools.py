@@ -744,6 +744,8 @@ def _dispatch_bridge_tool(function_name: str, function_args: dict[str, Any],
     try:
         current_defs = get_tool_definitions(enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
                                             quiet_mode=True, skip_tool_search_assembly=True) or []
+        from tools.prompt_text import apply_tool_text
+        current_defs = apply_tool_text(current_defs)
     except Exception:
         current_defs = []
     args = function_args or {}

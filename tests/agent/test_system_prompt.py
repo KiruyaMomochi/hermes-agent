@@ -126,6 +126,38 @@ def test_memory_guidance_respects_available_writes(stores, names, monkeypatch, t
         assert "never target='memory'" in prompt
 
 
+@pytest.mark.parametrize("value", ["CUSTOM_MEMORY_GUIDANCE", ""])
+@pytest.mark.parametrize("stores", [(True, True), (True, False), (False, True), (False, False)])
+@pytest.mark.parametrize("memory_tool", [True, False])
+def test_memory_guidance_overrides_reach_prompt(monkeypatch, tmp_path, value, stores, memory_tool):
+    from agent import prompt_builder as pb
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pb, "MEMORY_GUIDANCE_BODY", value)
+    agent = _make_agent(valid_tool_names={"memory"} if memory_tool else set(),
+                        skip_context_files=True,
+                        _memory_enabled=stores[0], _user_profile_enabled=stores[1])
+
+    prompt = build_system_prompt(agent)
+
+    assert ("CUSTOM_MEMORY_GUIDANCE" in prompt) == (bool(value) and memory_tool and any(stores))
+    assert "Memory is the narrow exception" not in prompt
+
+
+def test_memory_override_does_not_replace_profile_only_guidance(monkeypatch, tmp_path):
+    from agent import prompt_builder as pb
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pb, "MEMORY_GUIDANCE_FRAME", "CUSTOM_MEMORY_GUIDANCE")
+    agent = _make_agent(valid_tool_names={"memory"}, skip_context_files=True,
+                        _memory_enabled=False, _user_profile_enabled=True)
+
+    prompt = build_system_prompt(agent)
+
+    assert "CUSTOM_MEMORY_GUIDANCE" not in prompt
+    assert "never target='memory'" in prompt
+
+
 class TestContextFileCwd:
     def test_none_when_terminal_cwd_unset(self, monkeypatch):
         # Unset → None, so discovery falls back to the launch dir inside

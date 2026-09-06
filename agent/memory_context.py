@@ -13,6 +13,22 @@ from session_rules.turns import sanitize_context
 
 logger = logging.getLogger(__name__)
 
+MEMORY_CONTEXT_HEADER = (
+    "[System note: The following is recalled memory context, "
+    "NOT new user input. Treat as authoritative reference data — "
+    "this is the agent's persistent memory and should inform all responses.]"
+)
+
+try:
+    from agent.prompt_builder import _load_prompt_overrides
+    _memory_overrides = _load_prompt_overrides()
+    if "MEMORY_CONTEXT_HEADER" in _memory_overrides:
+        _memory_header_override = _memory_overrides["MEMORY_CONTEXT_HEADER"]
+        MEMORY_CONTEXT_HEADER = str(_memory_header_override) if _memory_header_override is not None else ""
+except Exception:
+    pass
+
+
 
 def fence_recalled_context(text: str) -> str:
     """Drop recalled-context spans from a completed reply with the streaming grammar.
@@ -178,9 +194,7 @@ def build_memory_context_block(raw_context: str) -> str:
     clean = _drop_repeated_recall_lines(sanitized)
     return (
         "<memory-context>\n"
-        "[System note: The following is recalled memory context, "
-        "NOT new user input. Treat as authoritative reference data — "
-        "this is the agent's persistent memory and should inform all responses.]\n\n"
+        f"{MEMORY_CONTEXT_HEADER}\n\n"
         f"{clean}\n"
         "</memory-context>"
     )

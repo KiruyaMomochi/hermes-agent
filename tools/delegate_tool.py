@@ -314,7 +314,7 @@ def _build_child_agent(
 
         child_checkpoint_required = checkpoint_required_from_config()
         child_persistence = _open_child_persistence(child_session_db)
-        with delegated_child_context():
+        with delegated_child_context(profile_home=profile_home):
             try:
                 child = AIAgent(
                     **rt, max_iterations=max_iterations, prefill_messages=getattr(parent_agent, "prefill_messages", None),

@@ -683,7 +683,8 @@ class CLIStreamMixin:
         if enriched_parts:
             prefix = "\n\n".join(enriched_parts)
             return f"{prefix}\n\n{user_text}" if user_text else prefix
-        return user_text or "What do you see in this image?"
+        from agent.prompt_builder import IMAGE_ONLY_CAPTION
+        return user_text or IMAGE_ONLY_CAPTION
 
     def _console_print(self, *args, **kwargs):
         """Print through the active command-safe console (prompt_toolkit-safe Rich once the

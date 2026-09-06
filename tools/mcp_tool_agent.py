@@ -159,11 +159,15 @@ def refresh_agent_mcp_tools(
     from agent.delegation_backends import adopt_built_backend, saved_backend
     built_backend = saved_backend()
     new_defs = agent_tool_surface(agent, list(
-        get_tool_definitions(enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=quiet_mode) or []))
+        get_tool_definitions(enabled_toolsets=enabled, disabled_toolsets=disabled, quiet_mode=quiet_mode,
+                             skip_tool_search_assembly=True) or []))
     new_names = {_def_name(t) for t in new_defs}
     # Post-build families re-appended on LOCALS only; live attributes untouched until publish.
+    base_count = len(new_defs)
     staged_engine_names = _reinject_post_build_tools(agent, new_defs, new_names)
     _reinject_authorized_dynamic_tools(agent, new_defs, new_names)
+    from tools.prompt_text import agent_tool_text, apply_tool_text
+    new_defs[base_count:] = apply_tool_text(new_defs[base_count:], agent_tool_text(agent))
     # Registry membership is read OUTSIDE ``_agent_tools_lock``: taking ``registry._lock``
     # under the tools lock would be the first nesting of the two.
     prefix_registered: Optional[set] = None

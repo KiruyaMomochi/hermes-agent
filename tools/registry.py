@@ -20,7 +20,7 @@ from contextvars import ContextVar, copy_context
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Set
 
-from hermes_constants import hermes_home_key, normalize_scope
+from hermes_constants import get_hermes_home, hermes_home_key, normalize_scope
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,45 @@ _MAX_TOOL_ERROR_CHARS = 2048
 _TOOL_ERROR_TRUNCATION_MARKER = "… [truncated]"
 # Logs keep more of the body than the model sees, but still a bounded amount.
 _MAX_LOGGED_ERROR_CHARS = 8192
+
+
+_prompt_override_lock = threading.Lock()
+
+
+@functools.lru_cache(maxsize=32)
+def _read_prompt_overrides(path, mtime_ns, size):
+    from hermes_yaml import safe_load
+    with path.open("r", encoding="utf-8-sig") as fh:
+        value = safe_load(fh)
+    return value if isinstance(value, dict) else {}
+
+
+def _prompt_override_data():
+    try:
+        path = Path(get_hermes_home()) / "prompt_overrides.yaml"
+        stat = path.stat()
+        with _prompt_override_lock:
+            return _read_prompt_overrides(path, stat.st_mtime_ns, stat.st_size)
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        logger.debug("Failed to load prompt overrides: %s", exc, exc_info=True)
+        return {}
+
+
+def _prompt_override_value(value, key):
+    for part in key.split("."):
+        value = value.get(part) if isinstance(value, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def prompt_override(key: str) -> Optional[str]:
+    """Return a string override from the profile's prompt_overrides.yaml, if set.
+
+    Dotted keys walk nested maps (``tool_descriptions.browser_exec``). Read at
+    schema-build time so each profile gets its own file.
+    """
+    return _prompt_override_value(_prompt_override_data(), key)
 
 
 def _bound_error_text(text: str) -> str:

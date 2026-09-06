@@ -56,8 +56,11 @@ from session_rules import turns as _turns
 from session_rules.turns import drop_stale_api_content
 from persistence.core.errors import PersistenceError
 from tools.todo_tool import TODO_INJECTION_HEADER
+from tools.notice_text import notice_prefixes
 from tools.tool_result_storage import strip_archive_list
-from session_rules.turns import _content_text_for_contains, is_compaction_summary_message, user_originated_turn_view
+from session_rules.turns import (
+    _content_text_for_contains, is_compaction_summary_message, user_originated_turn_view,
+)
 from session_rules.turns import (
     _BACKGROUND_PROCESS_NOTIFICATION_PREFIX,
     _DB_PERSISTED_MARKER,
@@ -863,7 +866,7 @@ def _synthetic_user_row(content: str) -> bool:
     """True for scaffolding user rows that carry no real user words."""
     if not isinstance(content, str) or not content.strip():
         return True
-    return content.lstrip().startswith(_SYNTHETIC_USER_ROW_PREFIXES)
+    return content.lstrip().startswith(_SYNTHETIC_USER_ROW_PREFIXES + notice_prefixes())
 
 
 def _typed_user_text(content: str) -> str:
@@ -3979,8 +3982,8 @@ Write only the summary body. Do not include any preamble or prefix."""
             _LENGTH_CONTINUATION_NETWORK_STUB, _LEGACY_LENGTH_CONTINUATION_NETWORK_STUB,
             _LENGTH_CONTINUATION_OUTPUT_LIMIT,
         } or text.startswith((
-            _BACKGROUND_PROCESS_NOTIFICATION_PREFIX, TODO_INJECTION_HEADER + "\n", _LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX,
-        ))
+            TODO_INJECTION_HEADER + "\n", _LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX,
+        ) + notice_prefixes("process"))
 
     @staticmethod
     def _validate_summary_user_provenance(summary: str, has_user_turn: bool) -> None:

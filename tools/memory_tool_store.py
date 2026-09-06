@@ -18,10 +18,38 @@ from tools.threat_patterns import first_threat_message as _first_threat_message
 
 logger = logging.getLogger("tools.memory_tool")
 
-# Block header prefixes rendered by _render_block; agent/conversation_compression.py
-# matches them to detect a leftover block for an emptied target — keep in lockstep.
+# Upstream defaults. Compression rebuilds the prompt rather than matching titles.
 MEMORY_BLOCK_HEADERS = {
     "memory": "MEMORY (your personal notes)", "user": "USER PROFILE (who the user is)"}
+
+
+def get_memory_block_headers() -> dict[str, str]:
+    """Resolve profile-local titles; explicit null/empty removes only the title.
+
+    Use the shared path/mtime/size cache, not import-time state, so profile switches
+    and compaction rebuilds see current overrides without mutating the defaults.
+    """
+    from tools.registry import _prompt_override_data
+
+    overrides = _prompt_override_data().get("MEMORY_BLOCK_HEADERS")
+    headers = dict(MEMORY_BLOCK_HEADERS)
+    if isinstance(overrides, dict):
+        for target in headers:
+            if target in overrides:
+                value = overrides[target]
+                if value is None or isinstance(value, str):
+                    headers[target] = value if value is not None else ""
+    return headers
+
+
+def get_memory_block_order() -> list[str]:
+    """Only reorder the two built-in blocks; never omit or duplicate a store."""
+    from tools.registry import _prompt_override_data
+
+    order = _prompt_override_data().get("MEMORY_BLOCK_ORDER")
+    if order == ["user", "memory"]:
+        return ["user", "memory"]
+    return ["memory", "user"]
 
 ENTRY_DELIMITER = "\n§\n"
 
@@ -694,7 +722,7 @@ class MemoryStore:
         if not entries:
             return ""
         content, sep = ENTRY_DELIMITER.join(entries), "═" * 46
-        title = MEMORY_BLOCK_HEADERS["user" if target == "user" else "memory"]
+        title = get_memory_block_headers()["user" if target == "user" else "memory"]
         return f"{sep}\n{title} [{self._usage_pct(target, len(content))}]\n{sep}\n{content}"
 
     @staticmethod

@@ -41,6 +41,7 @@ list_router = APIRouter()
 search_router = APIRouter()
 manage_router = APIRouter()
 
+_config_profile_scope = late("_config_profile_scope", "hermes_cli.web_server_profiles")
 _cron_default_profile = late("_cron_default_profile", "hermes_cli.web_server_cron")
 _cron_profile_home = late("_cron_profile_home", "hermes_cli.web_server_cron")
 _open_session_db_for_profile = late("_open_session_db_for_profile", "hermes_cli.web_server_sessions")
@@ -877,7 +878,8 @@ async def get_session_timeline(
 
     def _read(store):
         sid = _timeline_session_id(store, session_id, owner)
-        timeline = store.messages.read_session_timeline(sid, limit=limit, after_row_id=after_row_id)
+        with _config_profile_scope(profile):
+            timeline = store.messages.read_session_timeline(sid, limit=limit, after_row_id=after_row_id)
         return {"session_id": sid, "profile": owner,
                 "entries": [{"row_id": e.row_id, "preview": e.preview, "timestamp": e.timestamp}
                             for e in timeline.entries],
@@ -898,7 +900,8 @@ async def get_session_messages_around(
 
     def _read(store):
         sid = _timeline_session_id(store, session_id, owner)
-        page = store.messages.read_prompt_page(sid, row_id, limit=limit)
+        with _config_profile_scope(profile):
+            page = store.messages.read_prompt_page(sid, row_id, limit=limit)
         if page is None:
             raise HTTPException(status_code=404, detail="Prompt not found")
         return {"session_id": sid, "profile": owner,

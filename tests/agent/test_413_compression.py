@@ -117,6 +117,52 @@ def agent():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("target", ["memory", "user"])
+@pytest.mark.parametrize("emptied", [False, True])
+def test_compaction_refreshes_custom_memory_titles_and_order(agent, monkeypatch, tmp_path, target, emptied):
+    """Rebuilds need no title matching, even after renames or emptied stores."""
+    from agent.system_prompt import _memory_parts
+    from hermes_yaml import safe_dump
+    from tools.memory_tool_store import MemoryStore
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    path = tmp_path / "prompt_overrides.yaml"
+    path.write_text(safe_dump({"MEMORY_BLOCK_HEADERS": {"memory": "舊筆記", "user": "舊人物"}}))
+    agent.compression_enabled = False
+    agent._memory_enabled = agent._user_profile_enabled = True
+    agent._memory_manager = None
+    renderer = MemoryStore()
+    entries = {"memory": ["memory fact"], "user": ["user fact"]}
+    store = MagicMock()
+    store.format_for_system_prompt.side_effect = lambda kind: renderer._render_block(kind, entries[kind])
+    agent._memory_store = store
+    agent._cached_system_prompt = "\n\n".join(_memory_parts(agent))
+    path.write_text(safe_dump({
+        "MEMORY_BLOCK_HEADERS": {"memory": "新的筆記標題", "user": "新的人物標題"},
+        "MEMORY_BLOCK_ORDER": ["user", "memory"],
+    }))
+    if emptied:
+        store.load_from_disk.side_effect = lambda: entries[target].clear()
+
+    with (
+        patch.object(agent.context_compressor, "compress", return_value=[
+            {"role": "user", "content": f"{SUMMARY_PREFIX}\nPrevious conversation"},
+        ]),
+        patch.object(agent, "_build_system_prompt", side_effect=lambda _: "\n\n".join(_memory_parts(agent))),
+    ):
+        _, prompt = agent._compress_context(
+            [{"role": "user", "content": "hello"}], "system prompt", approx_tokens=1234,
+        )
+
+    assert "舊筆記" not in prompt and "舊人物" not in prompt
+    for kind, title in (("memory", "新的筆記標題"), ("user", "新的人物標題")):
+        assert (title in prompt) is (not emptied or target != kind)
+        assert (f"{kind} fact" in prompt) is (not emptied or target != kind)
+    if not emptied:
+        assert prompt.index("新的人物標題") < prompt.index("新的筆記標題")
+    store.load_from_disk.assert_called_once()
+
+
 def test_current_user_turn_is_persisted_before_provider_call(agent):
     """The inbound user turn is flushed before provider/tool work can crash."""
     observed = []

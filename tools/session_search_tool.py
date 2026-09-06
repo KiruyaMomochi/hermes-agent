@@ -552,13 +552,14 @@ def _discover(persistence, query: str, role_filter: Optional[list[str]], limit: 
             results.append(entry)
     for entry in results:
         entry["link"] = _session_link(entry["session_id"], link_profile)
+    from tools.prompt_text import tool_text
     return _discover_payload(persistence, query, detail, results, sessions_searched=len(seen_sessions),
         **({"hidden_same_lineage": {"count": hidden_rows, "sessions": list(hidden_sessions.values()),
             "note": f"{hidden_rows} matching message(s) in {len(hidden_sessions)} same-lineage session(s) "
             "were hidden because they are still treated as live context (unended). This can be a gateway "
             "session whose end-write was lost. To read one anyway, pass only its session_id: "
             "session_search(session_id=...)."}} if hidden_rows else {}),
-        link_hint=(
+        link_hint=tool_text("tool_results.session_search.link_hint",
         "When referring the user to a session, write its `link` value "
         "verbatim inline mid-sentence (it renders as a titled link) — never "
         "as markdown, in backticks, on its own line, or next to the "

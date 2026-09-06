@@ -551,8 +551,11 @@ def _memory_parts(agent: Any) -> list[str]:
     tools the toolset config gated off)."""
     parts: list[str] = []
     if agent._memory_store:
-        for enabled, kind in ((agent._memory_enabled, "memory"), (agent._user_profile_enabled, "user")):
-            block = agent._memory_store.format_for_system_prompt(kind) if enabled else None
+        from tools.memory_tool_store import get_memory_block_order
+
+        enabled = {"memory": agent._memory_enabled, "user": agent._user_profile_enabled}
+        for kind in get_memory_block_order():
+            block = agent._memory_store.format_for_system_prompt(kind) if enabled[kind] else None
             if block:
                 parts.append(block)
     # External memory provider system prompt block (additive to built-in). Gated on the same check

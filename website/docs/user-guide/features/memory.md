@@ -56,6 +56,29 @@ The format includes:
 
 **Frozen snapshot pattern:** The system prompt injection is captured once at session start and never changes mid-session. This is intentional — it preserves the LLM's prefix cache for performance. When the agent adds/removes memory entries during a session, the changes are persisted to disk immediately but won't appear in the system prompt until the next session starts. Tool responses always show the live state.
 
+### Custom block titles and order
+
+The active profile's `prompt_overrides.yaml` can change the built-in memory
+presentation without changing the files, budgets, or enabled stores:
+
+```yaml
+MEMORY_BLOCK_HEADERS:
+  memory: "MEMORY (your personal notes)"
+  user: "USER PROFILE (who the user is)"
+MEMORY_BLOCK_ORDER: [memory, user]
+```
+
+These are the defaults. Set `MEMORY_BLOCK_ORDER: [user, memory]` to reverse the
+two blocks; invalid orders fall back to the default. Either title can be overridden
+independently; an empty string or `null` removes its title, not its contents.
+Invalid title types keep the default. External provider blocks still follow the
+built-in blocks. Changes take effect when the prompt is next built, including at
+normal compaction rebuilds, not by invalidating a running session's cached prompt.
+
+**Do not combine custom titles with manyhands:** its title-based removal of the
+operator's memory assumes the default titles and may expose private notes to
+non-owners when titles are changed.
+
 ## Memory Needs Session Boundaries
 
 The whole memory system is built around the moment a session **ends**: `MEMORY.md` and `USER.md` carry the essentials into the next session, and `session_search` fills the gaps once the old context is gone. Inside a single session none of that machinery has a reason to run — everything important is still in the live context, so the agent rarely consults `session_search` and mostly compacts memory entries instead of curating them.
