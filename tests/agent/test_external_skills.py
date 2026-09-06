@@ -61,10 +61,58 @@ class TestGetAllSkillsDirs:
             from agent.skill_utils import get_all_skills_dirs
             result = get_all_skills_dirs()
         assert result[0] == hermes_home / "skills"
-        assert result[1] == external_skills_dir.resolve()
+        # Additional roots (including the immutable bundled tree) may sit
+        # between the profile-local and configured external directories.
+        assert external_skills_dir.resolve() in result
+        assert result.index(external_skills_dir.resolve()) > 0
 
 
 class TestExternalSkillsInFindAll:
+    def test_empty_profile_discovers_bundled_skill(self, hermes_home, tmp_path):
+        bundled = tmp_path / "bundled-skills"
+        skill_dir = bundled / "reviewer"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: reviewer\ndescription: Bundled reviewer\n---\n\nBundled.\n"
+        )
+        local_skills = hermes_home / "skills"
+        with (
+            patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}),
+            patch("agent.skill_utils.get_bundled_skills_dir", return_value=bundled),
+            patch("tools.skills_tool.SKILLS_DIR", local_skills),
+        ):
+            from tools.skills_tool import _SKILLS_CACHE, _find_all_skills
+            _SKILLS_CACHE.clear()
+            skills = _find_all_skills()
+
+        assert next(skill for skill in skills if skill["name"] == "reviewer")["description"] == "Bundled reviewer"
+
+    def test_profile_copy_precedes_corresponding_bundled_skill(self, hermes_home, tmp_path):
+        bundled = tmp_path / "bundled-skills"
+        bundled_skill = bundled / "reviewer"
+        bundled_skill.mkdir(parents=True)
+        (bundled_skill / "SKILL.md").write_text(
+            "---\nname: reviewer\ndescription: Bundled reviewer\n---\n\nBundled.\n"
+        )
+        local_skills = hermes_home / "skills"
+        local_skill = local_skills / "reviewer"
+        local_skill.mkdir()
+        (local_skill / "SKILL.md").write_text(
+            "---\nname: reviewer\ndescription: Profile reviewer\n---\n\nLocal.\n"
+        )
+        with (
+            patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}),
+            patch("agent.skill_utils.get_bundled_skills_dir", return_value=bundled),
+            patch("tools.skills_tool.SKILLS_DIR", local_skills),
+        ):
+            from tools.skills_tool import _SKILLS_CACHE, _find_all_skills
+            _SKILLS_CACHE.clear()
+            skills = _find_all_skills()
+
+        matching = [skill for skill in skills if skill["name"] == "reviewer"]
+        assert len(matching) == 1
+        assert matching[0]["description"] == "Profile reviewer"
+
     def test_external_skills_found(self, hermes_home, external_skills_dir):
         (hermes_home / "config.yaml").write_text(
             f"skills:\n  external_dirs:\n    - {external_skills_dir}\n"
