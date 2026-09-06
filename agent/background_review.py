@@ -516,6 +516,66 @@ _COMBINED_REVIEW_PROMPT = (
     "either, say 'Nothing to save.' and stop — but don't reach for that conclusion as a default."
 )
 
+# Toolsets the review fork may dispatch to. ``memory`` is filtered later when the profile
+# disables memory, so listing it here never overrides that gate.
+_BACKGROUND_REVIEW_TOOLSETS = ["memory", "skills"]
+
+
+# ---------------------------------------------------------------------------
+# Profile-local overrides (HERMES_HOME/prompt_overrides.yaml)
+#
+# The prompt sweep in agent/prompt_builder.py only covers public ALL_CAPS strings defined in
+# THAT module, so the review prompts (underscore-prefixed, defined here) need their own
+# application step. Values are read once at import, like the prompt_builder sweep: a review
+# fork inherits the parent's cached system prompt, and re-reading per spawn would let the file
+# change mid-session.
+# ---------------------------------------------------------------------------
+_OVERRIDABLE_REVIEW_PROMPTS = (
+    "_MEMORY_REVIEW_PROMPT", "_SKILL_REVIEW_PROMPT", "_COMBINED_REVIEW_PROMPT",
+)
+
+
+def _apply_review_prompt_overrides() -> None:
+    """Replace review prompts / toolsets from ``prompt_overrides.yaml`` (best-effort)."""
+    try:
+        from agent.prompt_builder import _PROMPT_OVERRIDES as overrides
+    except Exception:
+        logger.debug("background review: prompt overrides unavailable", exc_info=True)
+        return
+    if not isinstance(overrides, dict) or not overrides:
+        return
+    scope = globals()
+    for name in _OVERRIDABLE_REVIEW_PROMPTS:
+        if name not in overrides:
+            continue
+        value = overrides[name]
+        # null → empty string, matching the prompt_builder sweep's "remove this section".
+        if value is None:
+            scope[name] = ""
+        elif isinstance(value, str):
+            scope[name] = value
+        else:
+            logger.warning(
+                "background review: ignoring non-string override for %s (%s)", name, type(value).__name__
+            )
+    toolsets = overrides.get("_BACKGROUND_REVIEW_TOOLSETS")
+    if toolsets is None:
+        return
+    names = (
+        [t.strip() for t in toolsets if isinstance(t, str) and t.strip()]
+        if isinstance(toolsets, list) else []
+    )
+    if names:
+        scope["_BACKGROUND_REVIEW_TOOLSETS"] = names
+    else:
+        logger.warning(
+            "background review: ignoring _BACKGROUND_REVIEW_TOOLSETS override "
+            "(expected a non-empty list of toolset names)"
+        )
+
+
+_apply_review_prompt_overrides()
+
 
 def _preview(text: str, limit: int) -> str:
     return text[:limit] + ("…" if len(text) > limit else "")
@@ -964,7 +1024,13 @@ def _review_tool_whitelist(
     # (#105921): a skill-nudge review never gets the memory tool, so an unattended fork cannot
     # act on the memory tool's "consolidate now" hint and delete entries no one reviewed.
     memory_on = review_agent._memory_enabled or review_agent._user_profile_enabled
-    review_toolsets = ["memory", "skills"] if memory_on and review_memory else ["skills"]
+    # A profile may broaden the set via prompt_overrides.yaml; the memory gate still wins, so a
+    # memory-disabled or skills-only review never gets the memory tool even if the override lists it.
+    review_toolsets = [
+        toolset
+        for toolset in _BACKGROUND_REVIEW_TOOLSETS
+        if toolset != "memory" or (memory_on and review_memory)
+    ]
     whitelist = {t["function"]["name"] for t in get_tool_definitions(enabled_toolsets=review_toolsets, quiet_mode=True)}
     # Read-only file tools: denying read_file/search_files caused a per-review denial storm that
     # starved the loop (read_file also registers the read with the read-before-write guard).
