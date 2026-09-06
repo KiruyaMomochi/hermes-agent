@@ -9,7 +9,7 @@ import sys
 from pathlib import Path, PurePath
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from hermes_constants import get_config_path, get_skills_dir, is_termux
+from hermes_constants import get_bundled_skills_dir, get_config_path, get_skills_dir, is_termux
 
 logger = logging.getLogger(__name__)
 
@@ -391,14 +391,25 @@ def display_skill_create_dir() -> str:
 
 
 def get_all_skills_dirs() -> List[Path]:
-    """Skill dirs: local ``~/.hermes/skills/`` first, then create_dir, then external.
-    Trusted project dirs are NOT included (higher precedence; see get_project_skills_dirs)."""
-    dirs = [get_skills_dir()]
+    """Skill dirs: profile-local, bundled, create_dir, then configured external.
+
+    The immutable bundled tree is deliberately included here rather than copied
+    into each profile. This is required for spawned workers, whose profile home
+    may contain no user-installed skills at all.
+    """
+    candidates = [get_skills_dir(), get_bundled_skills_dir(Path(__file__).parent.parent / "skills")]
     create_dir = get_skill_create_dir()
     if create_dir is not None and create_dir.is_dir():
-        dirs.append(create_dir)
-    dirs.extend(d for d in get_external_skills_dirs() if d not in dirs)
-    return dirs
+        candidates.append(create_dir)
+    candidates.extend(get_external_skills_dirs())
+    result: List[Path] = []
+    seen: Set[Path] = set()
+    for path in candidates:
+        resolved = Path(path).resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            result.append(resolved)
+    return result
 
 
 # Project-local skills (<root>/.hermes/skills, <root>/.agents/skills; root = nearest

@@ -61,7 +61,10 @@ class TestGetAllSkillsDirs:
             from agent.skill_utils import get_all_skills_dirs
             result = get_all_skills_dirs()
         assert result[0] == hermes_home / "skills"
-        assert result[1] == external_skills_dir.resolve()
+        # Additional roots (including the immutable bundled tree) may sit
+        # between the profile-local and configured external directories.
+        assert external_skills_dir.resolve() in result
+        assert result.index(external_skills_dir.resolve()) > 0
 
 
 class TestExternalSkillsInFindAll:

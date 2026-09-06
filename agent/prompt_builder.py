@@ -1272,7 +1272,9 @@ def build_skills_system_prompt(
     else:
         skills_dir = get_skills_dir()
     try:
-        external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
+        all_skill_dirs = get_all_skills_dirs()
+        local_root = skills_dir.resolve()
+        external_dirs = [path for path in all_skill_dirs if path.resolve() != local_root]
         # Trusted project-local dirs — highest-precedence tier; cwd/trust are session-stable, so byte-stable.
         from agent.skill_utils import get_project_skills_dirs
         project_dirs = get_project_skills_dirs()
