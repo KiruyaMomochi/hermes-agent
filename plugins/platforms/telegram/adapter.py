@@ -459,6 +459,8 @@ class TelegramAdapter(BasePlatformAdapter):
         # but skips rich draft rendering; the final reply still lands via sendRichMessage.
         self._rich_messages_enabled: bool = self._coerce_bool_extra("rich_messages", False)
         self._rich_drafts_enabled: bool = self._coerce_bool_extra("rich_drafts", False)
+        self._disable_cjk_rich_guard: bool = self._coerce_bool_extra("disable_cjk_rich_guard", False)
+        self._trace_sends: bool = self._coerce_bool_extra("trace_sends", False)
         self._rich_send_disabled = self._rich_draft_disabled = False  # latched after a capability failure
         # Transient sendChatAction failures recur on every keep-typing tick; back off per chat.
         self._telegram_typing_cooldown_until: Dict[str, float] = {}
@@ -1206,6 +1208,13 @@ class TelegramAdapter(BasePlatformAdapter):
             return default
         return bool(value)
 
+    def _trace_send(self, event: str, **details: Any) -> None:
+        """Emit opt-in send-path diagnostics without message text or secrets."""
+        if getattr(self, "_trace_sends", False):
+            rendered = " ".join(f"{key}={value!r}" for key, value in details.items())
+            suffix = f" {rendered}" if rendered else ""
+            logger.warning("[%s] [Telegram trace] %s%s", self.name, event, suffix)
+
     def _coerce_float_extra(
         self, key: str, default: float, *, min_value: Optional[float] = None, max_value: Optional[float] = None) -> float:
         value = self.config.extra.get(key) if getattr(self.config, "extra", None) else None
@@ -1293,18 +1302,24 @@ class TelegramAdapter(BasePlatformAdapter):
         return bool(
             content and content.strip()
             and not self._has_telegram_desktop_details_math_crash_shape(content)
-            and not self._has_telegram_desktop_cjk_rich_garble_shape(content)
+            and (
+                getattr(self, "_disable_cjk_rich_guard", False)
+                or not self._has_telegram_desktop_cjk_rich_garble_shape(content)
+            )
             and self._content_fits_rich_limits(content)
             and self._bot_supports_rich())
 
     def _rich_eligible(self, content: str) -> bool:
         """Rich eligibility ignoring ``expect_edits`` (a streamed preview's FINAL edit still upgrades)."""
-        return bool(
+        eligible = bool(
             self._rich_delivery_enabled()
             and not getattr(self, "_rich_send_disabled", False)
             and content and content.strip()
             and self._needs_rich_rendering(content)
             and self._rich_content_ok(content))
+        self._trace_send("rich_decision", eligible=eligible,
+                         cjk_guard_disabled=getattr(self, "_disable_cjk_rich_guard", False))
+        return eligible
 
     def _should_attempt_rich(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
         return bool(not (metadata or {}).get("expect_edits") and self._rich_eligible(content))
@@ -1423,6 +1438,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self, chat_id: str, content: str, reply_to: Optional[str], metadata: Optional[Dict[str, Any]]) -> Optional[SendResult]:
         """Attempt a single ``sendRichMessage``. Returns a SendResult (success, or a transient failure the
         caller must NOT legacy-resend), or ``None`` = fall back to legacy MarkdownV2."""
+        self._trace_send("rich_send_attempt", has_reply_to=reply_to is not None)
         thread_id = self._metadata_thread_id(metadata)
         routing = self._compute_single_send_routing(chat_id, reply_to, metadata, thread_id)
         if routing is None:
@@ -1497,12 +1513,15 @@ class TelegramAdapter(BasePlatformAdapter):
         return SendResult(success=True, message_id=message_id)
 
     def _should_attempt_rich_draft(self, content: str) -> bool:
-        return bool(
+        eligible = bool(
             getattr(self, "_rich_messages_enabled", True)
             and getattr(self, "_rich_drafts_enabled", False)
             and not getattr(self, "_rich_send_disabled", False)
             and not getattr(self, "_rich_draft_disabled", False)
             and self._rich_content_ok(content))
+        self._trace_send("rich_draft_decision", eligible=eligible,
+                         cjk_guard_disabled=getattr(self, "_disable_cjk_rich_guard", False))
+        return eligible
 
     async def _try_send_rich_draft(self, chat_id: str, draft_id: int, content: str, metadata: Optional[Dict[str, Any]]) -> bool:
         """Emit one ``sendRichMessageDraft`` frame; True on success. Frames are ephemeral, so any failure
@@ -1511,7 +1530,9 @@ class TelegramAdapter(BasePlatformAdapter):
             "chat_id": normalize_telegram_chat_id(chat_id), "draft_id": int(draft_id), "rich_message": self._rich_message_payload(content)}
         payload.update(self._thread_kwargs_for_draft(chat_id, metadata))
         try:
-            return bool(await self._bot.do_api_request("sendRichMessageDraft", api_kwargs=payload))
+            result = bool(await self._bot.do_api_request("sendRichMessageDraft", api_kwargs=payload))
+            self._trace_send("rich_draft_send", success=result)
+            return result
         except Exception as exc:
             if self._is_rich_capability_error(exc):
                 self._rich_draft_disabled = True
@@ -3732,17 +3753,20 @@ class TelegramAdapter(BasePlatformAdapter):
     def supports_draft_streaming(self, chat_type: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """sendMessageDraft works for private chats only (Bot API 9.5) and needs PTB >= 22.6; groups and
         older installs use the edit-based path. ``rich_drafts`` controls draft *format*, not availability."""
-        if not self._bot or not hasattr(self._bot, "send_message_draft"):
-            return False
-        return (chat_type or "").lower() in {"dm", "private"}
+        supported = bool(self._bot and hasattr(self._bot, "send_message_draft")
+                         and (chat_type or "").lower() in {"dm", "private"})
+        self._trace_send("draft_support", supported=supported, chat_type=chat_type or "")
+        return supported
 
     async def send_draft(self, chat_id: str, draft_id: int, content: str, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """Stream a partial message via ``sendRichMessageDraft`` (when rich is enabled and supported) else
         ``sendMessageDraft``; reusing ``draft_id`` animates the preview. The caller sends the final text."""
         if not self._bot:
+            self._trace_send("draft_send", success=False, reason="not_connected")
             return SendResult(success=False, error="not_connected")
         # Rich draft fast-path; any failure degrades to the plain draft below. Drafts have no message_id.
         if self._should_attempt_rich_draft(content) and await self._try_send_rich_draft(chat_id, draft_id, content, metadata):
+            self._trace_send("draft_send", success=True, rich=True)
             return SendResult(success=True, message_id=None)
         if not hasattr(self._bot, "send_message_draft"):
             return SendResult(success=False, error="api_unavailable")
