@@ -223,6 +223,56 @@ class TestFinalAdoptionGuards:
 
 class TestQueuedLaneReconcile:
     @pytest.mark.asyncio
+    async def test_reasoning_display_does_not_change_canonical_match(self):
+        """Gateway presentation must not be used to reconcile the streamed final."""
+        from gateway.run import GatewayRunner
+
+        seen = []
+        consumer = SimpleNamespace(
+            final_response_sent=True,
+            final_content_delivered=True,
+            delivered_final_matches=lambda text: seen.append(text) or True,
+        )
+        response = {
+            "final_response": "> 💭 **Reasoning:**\n> checking\n\nanswer",
+            "_canonical_final_response": "answer",
+        }
+        turn_ctx = SimpleNamespace(
+            stream_consumer_holder=[consumer], source=SimpleNamespace(chat_id="D1"),
+            session_key="session-1",
+        )
+        await GatewayRunner._run_agent_mark_streamed_delivery(
+            object.__new__(GatewayRunner), response, turn_ctx,
+        )
+        assert response["already_sent"] is True
+        assert seen == ["answer", "answer"]
+
+    @pytest.mark.asyncio
+    async def test_split_canonical_delivery_suppresses_corrective_combined_send(self):
+        """Split chunks reconcile against the canonical final, not its display wrapper."""
+        from gateway.run import GatewayRunner
+
+        seen = []
+        consumer = SimpleNamespace(
+            final_response_sent=True, final_content_delivered=True,
+            _turn_split_delivery=True,
+            delivered_final_matches=lambda text: seen.append(text) or True,
+        )
+        response = {
+            "final_response": "> 💭 **Reasoning:**\n> checking\n\nlong split answer",
+            "_canonical_final_response": "long split answer",
+        }
+        turn_ctx = SimpleNamespace(
+            stream_consumer_holder=[consumer], source=SimpleNamespace(chat_id="D1"),
+            session_key="session-1",
+        )
+        await GatewayRunner._run_agent_mark_streamed_delivery(
+            object.__new__(GatewayRunner), response, turn_ctx,
+        )
+        assert response["already_sent"] is True
+        assert seen == ["long split answer", "long split answer"]
+
+    @pytest.mark.asyncio
     async def test_queued_first_response_edits_in_place(self):
         from gateway.run import GatewayRunner
 

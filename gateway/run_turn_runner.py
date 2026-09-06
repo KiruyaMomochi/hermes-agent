@@ -1749,6 +1749,9 @@ class TurnRunner:
         # returns, so early run_sync returns are also finalised.
         # See the outer finally/completion section below. See #60671.
         final_response = result.get("final_response")
+        # Keep the exact payload handed to finish() separate from later display-only
+        # decoration (reasoning, footer, and other gateway presentation).
+        canonical_final_response = final_response
         # Actual token counts from the agent instance used for this run.
         agent = ctx.agent_holder[0]
         has_comp = bool(agent) and hasattr(agent, "context_compressor")
@@ -1784,12 +1787,13 @@ class TurnRunner:
                 final_response = f"⚠️ {result['error']}" if result.get("error") else ""
             # NOTE: deliberately omits agent_persisted/last_reasoning/response_* — the caller
             # defaults agent_persisted differently when the key is absent.
-            return {"final_response": final_response, **common}
+            return {"final_response": final_response, "_canonical_final_response": canonical_final_response, **common}
         final_response = self._append_auto_media_tags(final_response, result, agent_history, history_media_paths)
         # Auto-titling runs at TURN START (agent/turn_context.py) from the user's message alone, so a
         # failed/interrupted turn is still titled.
         return {
-            "final_response": final_response, "last_reasoning": result.get("last_reasoning"), **common,
+            "final_response": final_response, "_canonical_final_response": canonical_final_response,
+            "last_reasoning": result.get("last_reasoning"), **common,
             "response_previewed": result.get("response_previewed", False),
             "response_transformed": result.get("response_transformed", False),
             # Lets the persistence block tell whether the codex app-server path self-persisted (it
