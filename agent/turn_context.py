@@ -87,11 +87,34 @@ def compose_user_api_content(
     (what turn N sends is what turn N+1 replays). ``None`` when nothing is injected."""
     if not isinstance(content, str):
         return None
-    fenced = build_memory_context_block(ext_prefetch_cache) if ext_prefetch_cache else ""
+    from agent.context_control import load_settings
+
+    control = load_settings()
+    fenced = (
+        build_memory_context_block(ext_prefetch_cache)
+        if ext_prefetch_cache and control.enabled and control.position != "system"
+        else ""
+    )
     injections = [part for part in (fenced, plugin_user_context) if part]
     if not injections:
         return None
+    if fenced and control.position == "before":
+        return fenced + "\n\n" + content + ("\n\n" + plugin_user_context if plugin_user_context else "")
     return content + "\n\n" + "\n\n".join(injections)
+
+
+def _system_memory_context(ext_prefetch_cache: Any) -> str:
+    """Return context selected for API-time system injection.
+
+    This is deliberately ephemeral: adding it after the cached system prompt keeps
+    the session's persisted prompt and cache prefix byte-stable.
+    """
+    from agent.context_control import load_settings
+
+    control = load_settings()
+    if not ext_prefetch_cache or not control.enabled or control.position != "system":
+        return ""
+    return build_memory_context_block(ext_prefetch_cache)
 
 
 def substitute_api_content(api_msg: Dict[str, Any]) -> Optional[str]:
@@ -1113,8 +1136,10 @@ def build_api_messages(
     # Plugin/recall context goes into the user message, never the system prompt: the
     # prompt is built ONCE per session and replayed verbatim (stable cache prefix).
     effective_system = active_system_prompt or ""
-    if agent.ephemeral_system_prompt:
-        effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
+    system_additions = [agent.ephemeral_system_prompt, _system_memory_context(ext_prefetch_cache)]
+    for addition in system_additions:
+        if addition:
+            effective_system = (effective_system + "\n\n" + addition).strip()
     if effective_system:
         api_messages = [{"role": "system", "content": effective_system}] + api_messages
     return api_messages, effective_system

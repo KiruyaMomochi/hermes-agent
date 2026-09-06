@@ -1603,9 +1603,21 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
         try:
             cfg = self._recall_config()
+            # Runtime controls are intentionally separate from config.yaml: they can
+            # be tuned per turn without restarting a gateway.  Keep config values as
+            # the baseline when the optional control file is absent or invalid.
+            try:
+                from agent.context_control import load_settings
+                control = load_settings()
+            except Exception:
+                control = None
+            if control is not None and control.enabled:
+                cfg["score_threshold"] = control.min_score
+                cfg["limit"] = control.max_items
             deadline = time.monotonic() + cfg["timeout_seconds"]
             result = self._unwrap_result(self._post_prefetch_search(
-                client, query_text, session_id, limit=max(cfg["limit"] * 4, 20),
+                client, query_text, session_id,
+                limit=max((control.top_k if control is not None and control.enabled else cfg["limit"]) * 4, 20),
                 context_type=["memory", "resource"] if cfg["resources"] else "memory",
                 deadline=deadline, request_timeout=cfg["request_timeout_seconds"],
             ))
