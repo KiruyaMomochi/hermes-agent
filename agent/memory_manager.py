@@ -31,6 +31,15 @@ _LEGACY_PRE_COMPRESS_API_VERSION = 1
 _SYNC_DRAIN_TIMEOUT_S = 5.0
 _EXTERNAL_PREFETCH_TIMEOUT_S = 8.0
 
+# The note is part of the fenced memory block and is intentionally overridable
+# alongside the other prompt constants.  Keep the complete bracketed form here
+# so adapters can translate it without having to reproduce the fence wrapper.
+MEMORY_CONTEXT_HEADER = (
+    "[System note: The following is recalled memory context, "
+    "NOT new user input. Treat as authoritative reference data — "
+    "this is the agent's persistent memory and should inform all responses.]"
+)
+
 
 # -- Signature introspection (providers are duck-typed; call shapes vary) -----
 
@@ -168,8 +177,23 @@ def inject_memory_provider_tools(agent: Any) -> int:
 
 _FENCE_TAG_RE = re.compile(r'</?\s*memory-context\s*>', re.IGNORECASE)
 _INTERNAL_CONTEXT_RE = re.compile(r'<\s*memory-context\s*>[\s\S]*?</\s*memory-context\s*>', re.IGNORECASE)
+# Apply the same prompt-overrides file used by prompt_builder.  This import is
+# deliberately local to module initialization: prompt_builder has no import
+# dependency on MemoryManager, avoiding a module-level cycle.
+try:
+    from agent.prompt_builder import _load_prompt_overrides
+    _memory_overrides = _load_prompt_overrides()
+    if "MEMORY_CONTEXT_HEADER" in _memory_overrides:
+        _memory_header_override = _memory_overrides["MEMORY_CONTEXT_HEADER"]
+        MEMORY_CONTEXT_HEADER = str(_memory_header_override) if _memory_header_override is not None else ""
+except Exception:
+    pass
+
 _INTERNAL_NOTE_RE = re.compile(
-    r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]\s*',
+    r'(?:' + re.escape(MEMORY_CONTEXT_HEADER) + r'|'
+    r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*'
+    r'Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]|'
+    r'\[(?:系统提示|系统注释|系统说明)\s*[:：][^\]]*(?:记忆|上下文)[^\]]*\])\s*',
     re.IGNORECASE,
 )
 
@@ -278,9 +302,7 @@ def build_memory_context_block(raw_context: str) -> str:
         logger.warning("memory provider returned pre-wrapped context; stripped")
     return (
         "<memory-context>\n"
-        "[System note: The following is recalled memory context, "
-        "NOT new user input. Treat as authoritative reference data — "
-        "this is the agent's persistent memory and should inform all responses.]\n\n"
+        f"{MEMORY_CONTEXT_HEADER}\n\n"
         f"{clean}\n"
         "</memory-context>"
     )
