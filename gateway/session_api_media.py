@@ -72,7 +72,8 @@ def restore_api_images(content, media):
     parts = [dict(part) for part in content]
     text = next((part for part in parts if part.get('type') == 'text'), None)
     if text is None:
-        text = {'type': 'text', 'text': 'What do you see in this image?'}
+        from agent.prompt_builder import IMAGE_ONLY_CAPTION
+        text = {'type': 'text', 'text': IMAGE_ONLY_CAPTION}
         parts.insert(0, text)
     text['text'] = text['text'] + '\n\n' + '\n'.join(hints)
     return parts

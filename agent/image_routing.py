@@ -558,7 +558,8 @@ def build_native_content_parts(
     text = (user_text or "").strip()
     if not attached:
         return ([{"type": "text", "text": text}] if text else []), skipped
-    combined_text = f"{text or 'What do you see in this image?'}\n\n" + "\n".join(h for _, h in attached)
+    from agent.prompt_builder import IMAGE_ONLY_CAPTION
+    combined_text = f"{text or IMAGE_ONLY_CAPTION}\n\n" + "\n".join(h for _, h in attached)
     image_parts = [{"type": "image_url", "image_url": {"url": u}} for u, _ in attached]
     return [{"type": "text", "text": combined_text}, *image_parts], skipped
 
