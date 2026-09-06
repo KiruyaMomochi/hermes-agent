@@ -1516,6 +1516,8 @@ DEFAULT_CONFIG = {
             # Experimental rich draft previews while streaming DMs; off because Telegram
             # Desktop/macOS can overlay draft frames until the chat redraws.
             "rich_drafts": False,
+            "disable_cjk_rich_guard": False,
+            "trace_sends": False,
         },
     },
 

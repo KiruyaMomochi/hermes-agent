@@ -126,6 +126,35 @@ async def test_astral_cjk_rich_content_skips_rich_send_to_avoid_tdesktop_garble(
 
 
 @pytest.mark.asyncio
+async def test_cjk_rich_guard_can_be_disabled_for_persistent_send_and_draft():
+    adapter = _make_adapter(extra={"disable_cjk_rich_guard": True, "rich_drafts": True})
+    result = await adapter.send("12345", CJK_RICH_CONTENT)
+    assert result.success is True
+    adapter._bot.do_api_request.assert_awaited_once()
+    assert adapter._bot.do_api_request.call_args.args[0] == "sendRichMessage"
+
+    adapter._bot.do_api_request.reset_mock()
+    draft_result = await adapter.send_draft("12345", draft_id=7, content=CJK_RICH_CONTENT)
+    assert draft_result.success is True
+    adapter._bot.do_api_request.assert_awaited_once()
+    assert adapter._bot.do_api_request.call_args.args[0] == "sendRichMessageDraft"
+
+
+def test_send_trace_is_opt_in_and_excludes_message_text(caplog):
+    adapter = _make_adapter()
+    caplog.set_level(logging.WARNING, logger="plugins.platforms.telegram.adapter")
+    adapter._rich_eligible(CJK_RICH_CONTENT)
+    assert "Telegram trace" not in caplog.text
+
+    traced = _make_adapter(extra={"trace_sends": True})
+    caplog.clear()
+    traced._rich_eligible(CJK_RICH_CONTENT)
+    assert "Telegram trace" in caplog.text
+    assert "CJK_RICH_CONTENT" not in caplog.text
+    assert CJK_RICH_CONTENT not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_plain_markdown_stays_on_legacy_path():
     """Ordinary replies (no table/task-list/details/math) stay on the legacy
     MarkdownV2 path for consistent client rendering, even with rich enabled."""
