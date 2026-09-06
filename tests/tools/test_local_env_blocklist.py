@@ -1570,6 +1570,21 @@ class TestSanePathIncludesHomebrew:
         from tools.environments.local import _SANE_PATH
         assert "/opt/homebrew/bin" in _SANE_PATH
 
+    def test_login_path_prelude_restores_parent_nix_entries(self, monkeypatch):
+        """Login profiles must not discard Nix profile/store paths."""
+        from tools.environments import local as local_mod
+
+        nix_entries = ["/home/test/.nix-profile/bin", "/nix/store/test/bin"]
+        monkeypatch.setattr(local_mod, "_managed_runtime_path_entries", lambda: [])
+        prelude = local_mod._path_fill_shell_prelude(
+            {"PATH": ":".join([*nix_entries, "/run/current-system/sw/bin"])}
+        )
+        assert "for __hermes_path_entry in" in prelude
+        for entry in nix_entries:
+            assert entry in prelude
+        assert "export PATH" in prelude
+        assert prelude.endswith("unset __hermes_path_entry\n")
+
 
     def test_make_run_env_appends_homebrew_on_minimal_path(self, monkeypatch):
         """When PATH is minimal, _make_run_env appends missing sane entries.

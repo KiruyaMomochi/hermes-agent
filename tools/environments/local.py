@@ -6,6 +6,7 @@ import ntpath
 import os
 import platform
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -515,6 +516,43 @@ def _append_missing_sane_path_entries(existing_path: str) -> str:
     return ":".join(ordered)
 
 
+def _path_repair_entries(env: dict) -> list[str]:
+    """Return trusted parent PATH entries for repair after login profiles run."""
+    entries: list[str] = []
+    for entry in (env.get("PATH") or "").split(":"):
+        if entry and entry not in entries:
+            entries.append(entry)
+    # Keep the parent PATH verbatim as the source of truth: NixOS commonly
+    # places tools in ~/.nix-profile and /nix/store rather than FHS paths.
+    for entry in _managed_runtime_path_entries():
+        if entry not in entries:
+            entries.append(entry)
+    for entry in _SANE_PATH.split(":"):
+        if entry and entry not in entries:
+            entries.append(entry)
+    return entries
+
+
+def _path_fill_shell_prelude(env: dict) -> str:
+    """Re-apply trusted parent PATH entries after a login shell's profiles."""
+    if _IS_WINDOWS:
+        return ""
+    quoted = " ".join(shlex.quote(entry) for entry in _path_repair_entries(env))
+    if not quoted:
+        return ""
+    return (
+        "for __hermes_path_entry in " + quoted + "; do\n"
+        "  [ -n \"$__hermes_path_entry\" ] || continue\n"
+        "  case \":$PATH:\" in\n"
+        "    *:\"$__hermes_path_entry\":*) ;;\n"
+        "    *) PATH=\"${PATH:+$PATH:}$__hermes_path_entry\" ;;\n"
+        "  esac\n"
+        "done\n"
+        "export PATH\n"
+        "unset __hermes_path_entry\n"
+    )
+
+
 def _apply_windows_msys_bash_env_defaults(env: dict) -> None:
     """Disable MSYS argument path conversion (``/FO`` -> ``C:/.../git/FO`` breaks
     tasklist/schtasks/wmic/``cmd /c``). Git for Windows honors ``MSYS_NO_PATHCONV``;
@@ -774,14 +812,18 @@ class LocalEnvironment(BaseEnvironment):
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
                   stdin_data: str | None = None) -> subprocess.Popen:
         bash = _find_bash()
+        run_env = _make_run_env(self.env)
         # Login invocations (init_session's env snapshot) source the user's rc /
         # custom init files so nvm/asdf/pyenv land on PATH in the snapshot.
         if login:
             cmd_string = _prepend_shell_init(cmd_string, _resolve_shell_init_files())
+            path_prelude = _path_fill_shell_prelude(run_env)
+            if path_prelude:
+                cmd_string = path_prelude + cmd_string
         args = [bash, *(["-l"] if login else []), "-c", cmd_string]
         self._recover_cwd()
         proc = subprocess.Popen(
-            args, text=True, env=_make_run_env(self.env), encoding="utf-8", errors="replace",
+            args, text=True, env=run_env, encoding="utf-8", errors="replace",
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
             start_new_session=True, cwd=self.cwd,
