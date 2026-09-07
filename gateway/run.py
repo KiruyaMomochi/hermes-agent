@@ -1206,6 +1206,27 @@ def _message_timestamps_enabled(user_config: Optional[dict]) -> bool:
     return bool(mt)
 
 
+def _local_datetime(value, tz=None) -> Optional[datetime]:
+    """Coerce a stored message timestamp to a timezone-aware local datetime."""
+    from gateway.message_timestamps import coerce_message_timestamp
+
+    epoch = coerce_message_timestamp(value, tz=tz)
+    if epoch is None:
+        return None
+    return datetime.fromtimestamp(epoch, tz=tz) if tz is not None else datetime.fromtimestamp(epoch).astimezone()
+
+
+def _last_user_message_datetime(history, tz=None) -> Optional[datetime]:
+    """Return the most recent parseable timestamp from a user history row."""
+    for msg in reversed(history or []):
+        if msg.get("role") != "user":
+            continue
+        timestamp = _local_datetime(msg.get("timestamp"), tz=tz)
+        if timestamp is not None:
+            return timestamp
+    return None
+
+
 def _build_gateway_agent_history(
     history: List[Dict[str, Any]], *, channel_prompt: Optional[str] = None,
     inject_timestamps: bool = False) -> tuple[List[Dict[str, Any]], Optional[str]]:
@@ -1214,7 +1235,7 @@ def _build_gateway_agent_history(
     Observed context stays out of ``conversation_history`` so consecutive-user repair can't merge it in."""
     from hermes_time import get_timezone as _get_msg_tz
     from gateway.message_timestamps import (
-        render_user_content_with_timestamp as _render_msg_ts,
+        inbound_timestamp_prefix as _inbound_ts_prefix,
         strip_leading_message_timestamps as _strip_msg_ts,
     )
 
@@ -1222,6 +1243,8 @@ def _build_gateway_agent_history(
     agent_history: List[Dict[str, Any]] = []
     observed_group_context: List[str] = []
     separate_observed_context = _uses_telegram_observed_group_context(channel_prompt)
+    previous_user_dt = None
+
 
     for msg in history or []:
         role = msg.get("role")
@@ -1232,7 +1255,13 @@ def _build_gateway_agent_history(
         content = msg.get("content")
         if separate_observed_context and msg.get("observed") and role == "user" and content:
             if inject_timestamps and isinstance(content, str):
-                content = _render_msg_ts(content, msg.get("timestamp"), tz=_msg_tz)
+                clean_content, embedded_timestamp = _strip_msg_ts(content, tz=_msg_tz)
+                effective_timestamp = msg.get("timestamp") or embedded_timestamp
+                prefix = _inbound_ts_prefix(
+                    effective_timestamp, previous=previous_user_dt, tz=_msg_tz,
+                )
+                content = f"{prefix} {clean_content}" if prefix else clean_content
+                previous_user_dt = _local_datetime(effective_timestamp, tz=_msg_tz) or previous_user_dt
             observed_group_context.append(str(content).strip())
             continue
 
@@ -1250,23 +1279,38 @@ def _build_gateway_agent_history(
                     clean_body = _strip_auto_continue_noise(body)
                     if clean_body != body:
                         content = clean_body
-                        if embedded_timestamp is not None:
-                            replay_timestamp = embedded_timestamp
+                    if embedded_timestamp is not None:
+                        replay_timestamp = embedded_timestamp
                 if not content:
                     continue
             # Keep user timestamps for the stale-dangerous-confirmation stripper in agent/replay_cleanup.py.
             entry = _build_replay_entry(role, content, msg, preserve_timestamp=(role == "user"))
             if inject_timestamps and role == "user" and isinstance(content, str):
-                rendered = _render_msg_ts(content, replay_timestamp, tz=_msg_tz)
+                prefix = _inbound_ts_prefix(
+                    replay_timestamp, previous=previous_user_dt, tz=_msg_tz,
+                )
+                rendered = f"{prefix} {content}" if prefix else content
                 # Preserve only a sidecar matching the complete rendered message,
                 # optionally followed by the normal context separator. Cleanup
                 # above already invalidated sidecars containing stripped content.
-                sidecar = entry.get("api_content")
-                if rendered != content and sidecar and not (
-                    sidecar == rendered or sidecar.startswith(rendered + "\n\n")
-                ):
+                sidecar = entry.get("api_content") or msg.get("api_content")
+                if sidecar and rendered != content:
+                    # A sidecar may have been produced with the old verbose
+                    # prefix. Compare its prefix-stripped body so changing the
+                    # display format does not discard API-only context.
+                    sidecar_body, _ = _strip_msg_ts(sidecar, tz=_msg_tz)
+                    if sidecar == rendered or sidecar.startswith(rendered + "\n\n"):
+                        pass
+                    elif sidecar_body == content or sidecar_body.startswith(content + "\n\n"):
+                        sidecar = rendered + sidecar_body[len(content):]
+                    else:
+                        sidecar = None
+                if sidecar:
+                    entry["api_content"] = sidecar
+                else:
                     entry.pop("api_content", None)
                 entry["content"] = rendered
+                previous_user_dt = _local_datetime(replay_timestamp, tz=_msg_tz) or previous_user_dt
             if msg.get("mirror"):
                 mirror_src = msg.get("mirror_source", "another session")
                 entry["content"] = f"[Delivered from {mirror_src}] {entry['content']}"

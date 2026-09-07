@@ -3,10 +3,8 @@ from zoneinfo import ZoneInfo
 
 from gateway.message_timestamps import (
     coerce_message_timestamp,
-    render_user_content_with_timestamp,
     strip_leading_message_timestamps,
 )
-from run_agent import AIAgent
 
 
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -14,23 +12,6 @@ BERLIN = ZoneInfo("Europe/Berlin")
 
 def _epoch(year, month, day, hour, minute, second):
     return datetime(year, month, day, hour, minute, second, tzinfo=BERLIN).timestamp()
-
-
-def test_render_user_content_deduplicates_existing_timestamp_and_preserves_embedded_time():
-    db_processing_ts = _epoch(2026, 4, 27, 15, 55, 36)
-    stored_content = (
-        "[Mon 2026-04-27 15:54:44 CEST] "
-        "[Example User] This should go on our todo list"
-    )
-
-    rendered = render_user_content_with_timestamp(
-        stored_content,
-        db_processing_ts,
-        tz=BERLIN,
-    )
-
-    assert rendered == stored_content
-    assert rendered.count("2026-04-27") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -67,3 +48,26 @@ def test_build_history_injects_only_when_enabled():
     assert agent_history[0]["content"].endswith("hello")
     # Assistant message is never timestamped.
     assert agent_history[1]["content"] == "hi"
+
+
+def test_build_history_uses_compact_prefixes_and_sixty_second_burst_rule():
+    from gateway.run import _build_gateway_agent_history
+
+    history = [
+        {"role": "user", "content": "first", "timestamp": _epoch(2026, 4, 28, 13, 40, 0)},
+        {"role": "assistant", "content": "one"},
+        {"role": "user", "content": "burst", "timestamp": _epoch(2026, 4, 28, 13, 40, 30)},
+        {"role": "assistant", "content": "two"},
+        {"role": "user", "content": "spaced", "timestamp": _epoch(2026, 4, 28, 13, 42, 0)},
+        {"role": "assistant", "content": "three"},
+        {"role": "user", "content": "next day", "timestamp": _epoch(2026, 4, 29, 9, 0, 0)},
+    ]
+
+    agent_history, _ = _build_gateway_agent_history(history, inject_timestamps=True)
+    users = [entry["content"] for entry in agent_history if entry["role"] == "user"]
+    assert users == [
+        "[2026-04-28 Tue 11:40] first",
+        "burst",
+        "[11:42] spaced",
+        "[2026-04-29 Wed 07:00] next day",
+    ]

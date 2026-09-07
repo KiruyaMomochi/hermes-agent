@@ -1321,18 +1321,21 @@ class GatewayTurnMixin:
                 f"to skip.",
             )
 
-    def _hmwa_apply_message_timestamp(self, event, message_text):
+    def _hmwa_apply_message_timestamp(self, event, message_text, history=None):
         """Capture the platform event time as message metadata and keep the persisted transcript
         clean (strip any leading timestamp prefix) regardless of the toggle; only the in-context
         RENDER is gated behind gateway.message_timestamps.enabled (default OFF)."""
-        from gateway.run import _load_gateway_config, _message_timestamps_enabled
+        from gateway.run import (
+            _last_user_message_datetime, _load_gateway_config,
+            _message_timestamps_enabled,
+        )
         persist_user_message = None
         persist_user_timestamp = None
         try:
             from hermes_time import get_timezone as _get_evt_tz
             from gateway.message_timestamps import (
                 coerce_message_timestamp as _coerce_msg_ts,
-                render_user_content_with_timestamp as _render_msg_ts,
+                inbound_timestamp_prefix as _inbound_ts_prefix,
                 strip_leading_message_timestamps as _strip_msg_ts,
             )
             _evt_tz = _get_evt_tz()
@@ -1342,7 +1345,14 @@ class GatewayTurnMixin:
                 _event_epoch = _coerce_msg_ts(getattr(event, "timestamp", None), tz=_evt_tz)
                 persist_user_timestamp = _event_epoch if _event_epoch is not None else _embedded_ts
                 if _message_timestamps_enabled(_load_gateway_config()):
-                    message_text = _render_msg_ts(_clean_message_text, persist_user_timestamp, tz=_evt_tz)
+                    prefix = _inbound_ts_prefix(
+                        persist_user_timestamp,
+                        previous=_last_user_message_datetime(history, tz=_evt_tz),
+                        tz=_evt_tz,
+                    )
+                    message_text = (
+                        f"{prefix} {_clean_message_text}" if prefix else _clean_message_text
+                    )
                 else:
                     # Toggle off: the model sees the clean message; timestamp stored for later opt-in.
                     message_text = _clean_message_text
@@ -1901,7 +1911,7 @@ class GatewayTurnMixin:
             return None, _session_env_tokens
 
         message_text, persist_user_message, persist_user_timestamp = (
-            self._hmwa_apply_message_timestamp(event, message_text)
+            self._hmwa_apply_message_timestamp(event, message_text, history)
         )
 
         # Stage the notes (one-shot; consumed in run_sync) AFTER the early-out so an aborted turn
