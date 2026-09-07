@@ -9,7 +9,9 @@ from gateway import message_timestamps
 from gateway.message_timestamps import (
     coerce_message_timestamp,
     format_message_timestamp,
+    inbound_timestamp_prefix,
     render_user_content_with_timestamp,
+    strip_leading_message_timestamps,
 )
 from hermes_time import safe_strftime
 
@@ -26,9 +28,9 @@ def test_render_numeric_timestamp_preserves_instant_in_system_timezone(epoch):
     # Epoch 1 is still in 1969 west of UTC. Windows rejects a naive
     # astimezone() conversion there, although the Unix timestamp is positive.
     local = datetime.fromtimestamp(epoch, tz=UTC).astimezone()
-    prefix = safe_strftime(local, "%a %Y-%m-%d %H:%M:%S %Z")
+    prefix = f"{local:%Y-%m-%d} {local:%a} {local:%H:%M}"
 
-    assert render_user_content_with_timestamp("hello", epoch) == f"[{prefix}] hello"
+    assert inbound_timestamp_prefix(epoch) == f"[{prefix}]"
 
 
 @pytest.mark.platforms("windows")
@@ -49,9 +51,9 @@ def test_early_embedded_local_time_preserves_instant(style, epoch):
              else local.replace(tzinfo=None).isoformat())
     content = f"[{stamp}] hello"
 
-    assert render_user_content_with_timestamp(content, 1_000_000_000.0) == (
-        render_user_content_with_timestamp("hello", epoch)
-    )
+    clean, embedded = strip_leading_message_timestamps(content)
+    assert clean == "hello"
+    assert inbound_timestamp_prefix(embedded) == inbound_timestamp_prefix(epoch)
 
 
 @pytest.mark.platforms("windows")
@@ -70,7 +72,7 @@ def test_early_embedded_local_time_replays_with_injection_on_or_off(style, enabl
         inject_timestamps=enabled,
     )
 
-    expected = render_user_content_with_timestamp("hello", 1.0) if enabled else content
+    expected = f"{inbound_timestamp_prefix(1.0)} hello" if enabled else content
     assert history[0]["content"] == expected
     assert history[1]["content"] == "hi"
 
@@ -87,7 +89,7 @@ def test_early_embedded_local_time_renders_in_observed_context():
     )
 
     assert history == []
-    assert observed == render_user_content_with_timestamp("hello", 1.0)
+    assert observed == f"{inbound_timestamp_prefix(1.0)} hello"
 
 
 @pytest.mark.parametrize("fold", [0, 1])
@@ -119,7 +121,7 @@ def test_unsupported_local_iso_is_uninterpretable_instead_of_raising():
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows' pre-epoch range limit")
 def test_unrenderable_epoch_preserves_the_message_body(epoch):
     assert format_message_timestamp(epoch) == ""
-    assert render_user_content_with_timestamp("hello", epoch) == "hello"
+    assert inbound_timestamp_prefix(epoch) == ""
 
 
 @pytest.mark.platforms("windows")
@@ -127,9 +129,10 @@ def test_unrenderable_epoch_preserves_the_message_body(epoch):
 def test_unsupported_embedded_time_keeps_metadata_fallback():
     content = "[Sun 1969-06-01 12:00:00] hello"
 
-    assert render_user_content_with_timestamp(content, 1_000_000_000.0) == (
-        render_user_content_with_timestamp("hello", 1_000_000_000.0)
-    )
+    clean, embedded = strip_leading_message_timestamps(content)
+    assert clean == "hello"
+    assert embedded is None
+    assert inbound_timestamp_prefix(embedded or 1_000_000_000.0)
 
 
 @pytest.mark.platforms("windows")
@@ -155,7 +158,7 @@ def test_system_timezone_conversion_starts_from_aware_utc(monkeypatch):
     monkeypatch.setattr(message_timestamps, "datetime", datetime_spy)
     epoch = 1_000_000_000.0
 
-    render_user_content_with_timestamp("hello", epoch)
+    inbound_timestamp_prefix(epoch)
 
     datetime_spy.fromtimestamp.assert_called_once_with(epoch, tz=UTC)
 
@@ -167,21 +170,28 @@ def test_render_user_content_deduplicates_existing_timestamp_and_preserves_embed
         "[Example User] This should go on our todo list"
     )
 
-    rendered = render_user_content_with_timestamp(
-        stored_content,
-        db_processing_ts,
-        tz=BERLIN,
+    clean, embedded = strip_leading_message_timestamps(stored_content, tz=BERLIN)
+    assert clean == "[Example User] This should go on our todo list"
+    assert embedded == _epoch(2026, 4, 27, 15, 54, 44)
+    assert inbound_timestamp_prefix(embedded, tz=BERLIN) == "[2026-04-27 Mon 15:54]"
+    assert render_user_content_with_timestamp(stored_content, db_processing_ts, tz=BERLIN) == (
+        "[15:54] [Example User] This should go on our todo list"
     )
-
-    assert rendered == stored_content
-    assert rendered.count("2026-04-27") == 1
-
 
 # ---------------------------------------------------------------------------
 # Opt-in gate: gateway.message_timestamps.enabled (default OFF)
 # ---------------------------------------------------------------------------
 
 
+def test_message_timestamps_enabled_defaults_off():
+    from gateway.run import _message_timestamps_enabled
+
+    assert _message_timestamps_enabled(None) is False
+    assert _message_timestamps_enabled({}) is False
+    assert _message_timestamps_enabled({"gateway": {}}) is False
+    assert (
+        _message_timestamps_enabled({"gateway": {"message_timestamps": {}}}) is False
+    )
 
 
 def test_build_history_injects_only_when_enabled():
@@ -237,7 +247,7 @@ def test_compactor_restatement_replays_unstamped_through_session_db(tmp_path):
     from gateway.run import _build_gateway_agent_history
     from gateway.session import SessionStore
     from hermes_state import SessionDB
-    from hermes_time import get_timezone
+    from agent.message_metadata import is_compaction_scaffolding
 
     sent_at = _epoch(2026, 4, 28, 13, 40, 53)
     messages = [{"role": "system", "content": "sys"},
@@ -256,9 +266,10 @@ def test_compactor_restatement_replays_unstamped_through_session_db(tmp_path):
     with patch("agent.context_compressor.call_llm", return_value=summary):
         sent = [m for m in compressor.compress(messages, current_tokens=200_000, force=True) if m["role"] != "system"]
     sent.append({"role": "assistant", "content": "Done"})
-    # A human pasting the header text is still a message someone sent: it keeps its stamp.
+    # A human pasting the header text is still a real user message, not compaction scaffolding.
     pasted = f"{_INFLIGHT_TASK_REPLAY_HEADER}\nthis is a pasted log"
-    sent += [{"role": "user", "content": pasted, "timestamp": sent_at}, {"role": "assistant", "content": "ok"}]
+    # Five minutes later so the compact rule (no stamp under 60s) doesn't hide a missing stamp.
+    sent += [{"role": "user", "content": pasted, "timestamp": sent_at + 300}, {"role": "assistant", "content": "ok"}]
 
     db = SessionDB(db_path=tmp_path / "state.db")
     store = SessionStore(tmp_path / "sessions", GatewayConfig())
@@ -281,8 +292,11 @@ def test_compactor_restatement_replays_unstamped_through_session_db(tmp_path):
     assert restatement(sent) is not None
     assert restatement(first) == restatement(sent)
     assert restatement(replay) == restatement(sent)
-    assert next(m for m in replay if m["role"] == "user" and str(m["content"]).endswith("this is a pasted log"))[
-        "content"] == render_user_content_with_timestamp(pasted, sent_at, tz=get_timezone())
+    pasted_row = next(m for m in replay if m["role"] == "user" and str(m["content"]).endswith("this is a pasted log"))
+    assert not is_compaction_scaffolding(pasted_row)
+    # Same day, five minutes on: compact "[HH:MM] " prefix, then the pasted text untouched.
+    content = pasted_row["content"]
+    assert content.startswith("[") and content[6:8] == "] " and content[8:] == pasted, content
 
 
 def test_compaction_summary_stays_unstamped_across_real_prune(tmp_path):
@@ -318,3 +332,27 @@ def test_compaction_summary_stays_unstamped_across_real_prune(tmp_path):
         store.close_all_db_handles()
     assert pruned
     assert first[0]["content"] == replay[0]["content"] == summary["content"]
+
+
+def test_build_history_uses_compact_prefixes_and_sixty_second_burst_rule():
+    from gateway.run import _build_gateway_agent_history
+
+    history = [
+        {"role": "user", "content": "first", "timestamp": _epoch(2026, 4, 28, 13, 40, 0)},
+        {"role": "assistant", "content": "one"},
+        {"role": "user", "content": "burst", "timestamp": _epoch(2026, 4, 28, 13, 40, 30)},
+        {"role": "assistant", "content": "two"},
+        {"role": "user", "content": "spaced", "timestamp": _epoch(2026, 4, 28, 13, 42, 0)},
+        {"role": "assistant", "content": "three"},
+        {"role": "user", "content": "next day", "timestamp": _epoch(2026, 4, 29, 9, 0, 0)},
+    ]
+
+    agent_history, _ = _build_gateway_agent_history(history, inject_timestamps=True)
+    users = [entry["content"] for entry in agent_history if entry["role"] == "user"]
+    assert users == [
+        "[2026-04-28 Tue 11:40] first",
+        "burst",
+        "[11:42] spaced",
+        "[2026-04-29 Wed 07:00] next day",
+    ]
+
