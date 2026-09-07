@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from gateway.message_timestamps import render_user_content_with_timestamp
+from gateway.message_timestamps import inbound_timestamp_prefix
 from gateway.run import _build_gateway_agent_history, _select_cached_agent_history
 
 
@@ -19,8 +19,25 @@ NOTE = "[System note: Your previous turn was interrupted. Continue the old task.
 def _render(text, timestamp=STAMP):
     from hermes_time import get_timezone
 
-    return render_user_content_with_timestamp(text, timestamp, tz=get_timezone())
+    prefix = inbound_timestamp_prefix(timestamp, tz=get_timezone())
+    return f"{prefix} {text}"
 
+
+def test_compact_user_timestamps_keep_sidecar_only_assistant_turn():
+    replay, _ = _build_gateway_agent_history(
+        [
+            {"role": "user", "content": "first", "timestamp": STAMP},
+            {"role": "assistant", "content": "", "api_content": "sidecar answer"},
+            {"role": "user", "content": "later", "timestamp": STAMP + 120},
+        ],
+        inject_timestamps=True,
+    )
+
+    assert replay[0]["content"].startswith("[2026-")
+    assert replay[1] == {"role": "assistant", "content": "", "api_content": "sidecar answer"}
+    assert replay[2]["content"].startswith("[")
+    assert not replay[2]["content"].startswith("[2026-")
+    assert replay[2]["content"].endswith(" later")
 
 
 @pytest.mark.parametrize("timestamps", [False, True])
