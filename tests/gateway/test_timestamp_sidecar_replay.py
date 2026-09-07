@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from gateway.message_timestamps import render_user_content_with_timestamp
+from gateway.message_timestamps import inbound_timestamp_prefix
 from gateway.run import _build_gateway_agent_history, _select_cached_agent_history
 
 
@@ -19,7 +19,8 @@ NOTE = "[System note: Your previous turn was interrupted. Continue the old task.
 def _render(text, timestamp=STAMP):
     from hermes_time import get_timezone
 
-    return render_user_content_with_timestamp(text, timestamp, tz=get_timezone())
+    prefix = inbound_timestamp_prefix(timestamp, tz=get_timezone())
+    return f"{prefix} {text}"
 
 
 
