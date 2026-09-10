@@ -19,6 +19,7 @@ Three invariants:
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -61,6 +62,48 @@ def _make_draft_adapter():
 
 
 class TestConsumerDeclaredFinal:
+    def test_structured_reasoning_delta_has_a_dedicated_sink(self):
+        adapter = _make_draft_adapter()
+        sc = GatewayStreamConsumer(adapter, "D1")
+
+        sc.on_reasoning_delta("checking ")
+        sc.on_reasoning_delta("the answer\n---\nstill reasoning")
+
+        assert sc.reasoning_text == "checking the answer\n---\nstill reasoning"
+        assert sc._accumulated == "", "raw reasoning must not enter the answer stream"
+
+        sc.on_delta(None)
+        sc.on_reasoning_delta("final reasoning")
+        assert sc.reasoning_text == "final reasoning", "only the last reasoning block is displayed"
+
+    def test_turn_callback_wiring_registers_reasoning_sink(self, monkeypatch):
+        from gateway.run_turn_runner import TurnRunner
+
+        consumer = SimpleNamespace(parts=[], on_reasoning_delta=lambda text: consumer.parts.append(text))
+        ctx = SimpleNamespace(
+            stream_consumer_holder=[consumer], progress_callback=None,
+            _voice_ack_guild=[None], _native_slack_task_cards=False,
+            native_tool_start_callback=None, voice_ack_callback=None,
+            native_tool_complete_callback=None, _hooks_ref=SimpleNamespace(loaded_hooks=[]),
+            _step_callback_sync=None, _status_callback_sync=None, _event_callback_sync=None,
+            user_config={}, _status_adapter=None, session_key="s1", _thinking_enabled=False,
+            agent_holder=[None], tools_holder=[None], source=SimpleNamespace(),
+            process_task_id=None, process_baseline=None, _interrupt_depth=0,
+        )
+        runner = SimpleNamespace(
+            _service_tier=None, _consume_pending_turn_sidecar_notes=lambda _key: [],
+        )
+        turn_runner = TurnRunner(cast(Any, runner), cast(Any, ctx))
+        monkeypatch.setattr(turn_runner, "_attach_session_title_callback", lambda *_args, **_kwargs: None)
+        agent = SimpleNamespace(request_overrides={}, tools=[])
+
+        turn_runner._wire_turn_agent_callbacks(
+            agent, {"request_overrides": {}}, None, lambda text: None, None, False,
+        )
+        agent.reasoning_callback("structured")
+
+        assert consumer.parts == ["structured"]
+
     @pytest.mark.asyncio
     async def test_finish_final_text_rides_the_final_send(self):
         """The footer-bearing final_response must BE the finalize payload —
@@ -103,6 +146,44 @@ class TestConsumerDeclaredFinal:
         sc.finish()
         await task
         assert adapter.send_calls[-1]["content"] == "plain answer"
+
+    @pytest.mark.parametrize(
+        ("streamed_reasoning", "fallback_reasoning", "expected_reasoning"),
+        [
+            ("structured delta", "stored fallback", "structured delta"),
+            ("", "stored fallback", "stored fallback"),
+        ],
+    )
+    def test_turn_runner_decorates_stream_final_from_sink_or_fallback(
+        self, streamed_reasoning, fallback_reasoning, expected_reasoning,
+    ):
+        from gateway.run_turn_runner import TurnRunner
+
+        finished = []
+        consumer = SimpleNamespace(
+            reasoning_text=streamed_reasoning,
+            finish=lambda text=None: finished.append(text),
+        )
+        ctx = SimpleNamespace(result_holder=[None], source=SimpleNamespace(platform="telegram"))
+
+        class _Runner:
+            @staticmethod
+            def _hmwa_prepend_reasoning(result, response, source, intentional_silence):
+                assert source is ctx.source
+                assert intentional_silence is False
+                return f"REASONING[{result['last_reasoning']}]\n{response}"
+
+        turn_runner = TurnRunner(cast(Any, _Runner()), cast(Any, ctx))
+        result = {
+            "final_response": "final answer", "last_reasoning": fallback_reasoning,
+            "completed": True,
+        }
+
+        displayed = turn_runner._finish_stream_consumer(result, [], consumer)
+
+        assert displayed == f"REASONING[{expected_reasoning}]\nfinal answer"
+        assert finished == [displayed]
+        assert result["final_response"] == "final answer", "canonical final must remain unchanged"
 
 
 class TestInterimSendContract:
@@ -222,6 +303,35 @@ class TestFinalAdoptionGuards:
 
 
 class TestQueuedLaneReconcile:
+    @pytest.mark.asyncio
+    async def test_decorated_stream_delivery_suppresses_canonical_resend(self):
+        """The consumer ACKs the decorated payload while canonical text remains separate."""
+        from gateway.run import GatewayRunner
+
+        decorated = "💭 **Reasoning:**\n```\nchecking\n```\n\nanswer"
+        seen = []
+        consumer = SimpleNamespace(
+            final_response_sent=True,
+            final_content_delivered=True,
+            delivered_final_matches=lambda text: seen.append(text) or text == decorated,
+        )
+        response = {
+            "final_response": decorated,
+            "_canonical_final_response": "answer",
+            "_streamed_delivery_response": decorated,
+        }
+        turn_ctx = SimpleNamespace(
+            stream_consumer_holder=[consumer], source=SimpleNamespace(chat_id="D1"),
+            session_key="session-1",
+        )
+
+        await GatewayRunner._run_agent_mark_streamed_delivery(
+            object.__new__(GatewayRunner), response, cast(Any, turn_ctx),
+        )
+
+        assert response["already_sent"] is True
+        assert seen == [decorated, decorated]
+
     @pytest.mark.asyncio
     async def test_reasoning_display_does_not_change_canonical_match(self):
         """Gateway presentation must not be used to reconcile the streamed final."""

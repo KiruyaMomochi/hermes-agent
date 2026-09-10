@@ -1448,6 +1448,8 @@ class GatewayTurnMixin:
     def _hmwa_prepend_reasoning(self, agent_result, response, source, _intentional_silence):
         """Prepend the last reasoning block when show_reasoning is on for this platform. Mattermost
         requires an explicit per-platform opt-in (scratch text, not final-answer content)."""
+        if agent_result.get("_reasoning_displayed"):
+            return response
         from gateway.run import _load_gateway_config, _platform_config_key, _resolve_gateway_display_bool
         try:
             _show_reasoning_effective = _resolve_gateway_display_bool(
@@ -3628,7 +3630,9 @@ class GatewayTurnMixin:
         _sc, source, session_key = turn_ctx.stream_consumer_holder[0], turn_ctx.source, turn_ctx.session_key
         if not isinstance(response, dict) or response.get("failed"):
             return
-        _final = response.get("_canonical_final_response")
+        _final = response.get("_streamed_delivery_response")
+        if _final is None:
+            _final = response.get("_canonical_final_response")
         if _final is None:
             _final = response.get("final_response") or ""
         _is_empty_sentinel = not _final or _final == "(empty)"

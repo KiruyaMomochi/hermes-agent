@@ -55,3 +55,29 @@ def test_yaml_config_bridge():
 
     assert extras is not None
     assert extras["split_replies"] == split_cfg
+
+
+def test_decorated_reasoning_dashes_stay_fenced_but_final_delimiter_splits(monkeypatch):
+    """Raw reasoning punctuation is content; only the completed final controls fan-out."""
+    from gateway.config import Platform
+    from gateway.run import GatewayRunner
+    from gateway.platforms.event import SessionSource
+    import gateway.run as run_module
+
+    monkeypatch.setattr(
+        run_module, "_load_gateway_config",
+        lambda: {"display": {"show_reasoning": True, "reasoning_style": "code"}},
+    )
+    runner = object.__new__(GatewayRunner)
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="1", user_id="2")
+    decorated = runner._hmwa_prepend_reasoning(
+        {"last_reasoning": "consider A\n---\nconsider B"},
+        "First bubble\n\n---\n\nSecond bubble",
+        source,
+        False,
+    )
+
+    parts = split_reply_delimited(decorated)
+    assert len(parts) == 2
+    assert "consider A\n---\nconsider B" in parts[0][0]
+    assert parts[1][0] == "Second bubble"

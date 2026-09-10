@@ -153,6 +153,10 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         self._current_edit_interval = self.cfg.edit_interval  # adaptive backoff
         self._delivered_commentary_texts: list[str] = []
         self._delivered_segment_texts: list[str] = []  # finalized text per past segment
+        # Structured reasoning has its own sink.  Keep it out of the live answer
+        # buffer: Telegram's standalone ``---`` fan-out applies only to the complete
+        # decorated final, never to raw reasoning deltas.
+        self._reasoning_parts: list[str] = []
         self._in_think_block = False  # think-tag filter state (mirrors CLI _stream_delta)
         self._think_buffer = ""
         self._before_finalize_notified = False
@@ -392,6 +396,15 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         if text:
             self._queue.put((_COMMENTARY, text))
 
+    def on_reasoning_delta(self, text: str) -> None:
+        """Collect structured reasoning for final-response decoration."""
+        if text:
+            self._reasoning_parts.append(text)
+
+    @property
+    def reasoning_text(self) -> str:
+        return "".join(self._reasoning_parts)
+
     def flush_pending_sync(self, timeout: float = 5.0) -> bool:
         """Block the agent worker thread until everything queued so far is delivered:
         ``(_FLUSH, Event)`` barrier — run() drains earlier items (FIFO), finalizes the
@@ -507,13 +520,17 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                      _reason, self.chat_id)
         return False
 
-    def on_delta(self, text: str) -> None:
+    def on_delta(self, text: Optional[str]) -> None:
         """Thread-safe callback from the agent's worker thread.  ``None`` signals a tool
         boundary: the current message is finalized and subsequent text goes out as a new
         message below any tool-progress messages."""
         if text:
             self._queue.put(text)
         elif text is None:
+            # A tool boundary ends the current model response.  The gateway's
+            # display contract shows only the last reasoning block, matching
+            # ``result["last_reasoning"]`` on non-streaming providers.
+            self._reasoning_parts.clear()
             self.on_segment_break()
 
     def finish(self, final_text: Optional[str] = None) -> None:

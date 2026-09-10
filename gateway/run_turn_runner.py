@@ -1162,6 +1162,11 @@ class TurnRunner:
         agent.tool_complete_callback = ctx.native_tool_complete_callback if ctx._native_slack_task_cards else None
         agent.step_callback = ctx._step_callback_sync if ctx._hooks_ref.loaded_hooks else None
         agent.stream_delta_callback = stream_delta_cb
+        stream_consumer = self._stream_consumer()
+        agent.reasoning_callback = (
+            stream_consumer.on_reasoning_delta
+            if stream_consumer is not None and hasattr(stream_consumer, "on_reasoning_delta") else None
+        )
         agent.interim_assistant_callback = interim_assistant_cb if want_interim_messages else None
         agent.status_callback, agent.notice_callback = ctx._status_callback_sync, self._notice_callback_sync
         agent.notice_clear_callback = None  # sends can't be retracted
@@ -1557,7 +1562,7 @@ class TurnRunner:
             )
         ctx.result_holder[0] = result
         if stream_consumer is None:
-            return
+            return result.get("final_response") if isinstance(result, dict) else None
         # Pass final_response as the authoritative finalize payload: it includes post-stream
         # augmentation (verifier footer, explainer) the accumulator never saw. Adopt ONLY a genuinely
         # completed final: interrupt paths return {interrupted: True, completed: False} with a
@@ -1571,14 +1576,25 @@ class TurnRunner:
             fr = result.get("final_response")
             if isinstance(fr, str) and fr.strip() and fr != "(empty)":
                 _final_for_stream = fr
+                # Contract: reasoning is part of one decorated final, not a separate
+                # Telegram bubble.  Prefer the structured-delta sink, with last_reasoning
+                # as the non-streaming/provider fallback.  The canonical answer remains
+                # separate for transcript and duplicate-reconciliation semantics.
+                reasoning = getattr(stream_consumer, "reasoning_text", "") or result.get("last_reasoning")
+                display_result = dict(result)
+                display_result["last_reasoning"] = reasoning
+                _final_for_stream = self._runner._hmwa_prepend_reasoning(
+                    display_result, fr, ctx.source, False,
+                )
         if _final_for_stream is None:
             stream_consumer.finish()
-            return
+            return result.get("final_response") if isinstance(result, dict) else None
         # Duck-type safe: test doubles / older consumers may expose a zero-arg finish().
         try:
             stream_consumer.finish(_final_for_stream)
         except TypeError:
             stream_consumer.finish()
+        return _final_for_stream
 
     def _restore_telegram_thread_id_after_split(self, agent_session_id) -> None:
         """Telegram DM whose source.thread_id was lost in the session split (synthetic/recovered
@@ -1744,14 +1760,15 @@ class TurnRunner:
         agent_history, observed_group_context, history_media_paths = self._load_turn_history(agent, reused_cached_agent)
         persist_msg, persist_ts = self._prepare_turn_message(agent_history)
         result = self._run_conversation_with_approval(agent, agent_history, observed_group_context, persist_msg, persist_ts)
-        self._finish_stream_consumer(result, agent_history, stream_consumer)
+        canonical_final_response = result.get("final_response")
+        streamed_delivery_response = self._finish_stream_consumer(result, agent_history, stream_consumer)
         # The streaming-TTS consumer's finish() runs on the outer loop thread after the executor
         # returns, so early run_sync returns are also finalised.
         # See the outer finally/completion section below. See #60671.
-        final_response = result.get("final_response")
+        final_response = streamed_delivery_response
         # Keep the exact payload handed to finish() separate from later display-only
         # decoration (reasoning, footer, and other gateway presentation).
-        canonical_final_response = final_response
+
         # Actual token counts from the agent instance used for this run.
         agent = ctx.agent_holder[0]
         has_comp = bool(agent) and hasattr(agent, "context_compressor")
@@ -1793,6 +1810,10 @@ class TurnRunner:
         # failed/interrupted turn is still titled.
         return {
             "final_response": final_response, "_canonical_final_response": canonical_final_response,
+            "_streamed_delivery_response": streamed_delivery_response,
+            "_reasoning_displayed": bool(
+                stream_consumer is not None and streamed_delivery_response != canonical_final_response
+            ),
             "last_reasoning": result.get("last_reasoning"), **common,
             "response_previewed": result.get("response_previewed", False),
             "response_transformed": result.get("response_transformed", False),
