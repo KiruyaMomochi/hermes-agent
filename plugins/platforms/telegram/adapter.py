@@ -3404,12 +3404,13 @@ class TelegramAdapter(BasePlatformAdapter):
             )
 
             parts = split_reply_delimited(
-                content, max_parts=getattr(self, "_split_replies_max_parts", 8)
+                content, max_parts=getattr(self, "_split_replies_max_parts", 8),
+                with_offsets=True,
             )
             if len(parts) > 1:
                 message_ids: list[str] = []
                 split_metadata["_telegram_split_part"] = True
-                for index, (part, dash_count) in enumerate(parts):
+                for index, (part, dash_count, part_offset) in enumerate(parts):
                     if index:
                         delay = split_reply_delay_seconds(
                             getattr(self, "_split_replies_delay_seconds", 0.0), dash_count
@@ -3420,7 +3421,34 @@ class TelegramAdapter(BasePlatformAdapter):
                         reply_to if index == 0 or self._reply_to_mode == "all" else None
                     )
                     result = await self.send(chat_id, part, part_reply_to, split_metadata)
+                    # trace_sends: per-split-part outcome (index/total/result only; no content/PII).
+                    self._trace_send(
+                        "split_part", index=index, total=len(parts), success=result.success,
+                        retryable=result.retryable, error_kind=result.error_kind,
+                        retry_after=result.retry_after, delivered=len(message_ids),
+                    )
                     if not result.success:
+                        # Partial fanout: some parts delivered, this one failed. Preserve receipts
+                        # and signal partial_overflow so the consumer can recover the unsent tail.
+                        if index > 0:
+                            delivered_prefix = content[:part_offset].rstrip()
+                            return SendResult(
+                                success=False,
+                                message_id=message_ids[-1] if message_ids else None,
+                                error=result.error,
+                                retryable=result.retryable,
+                                retry_after=result.retry_after,
+                                error_kind=result.error_kind,
+                                raw_response={
+                                    "partial_overflow": True,
+                                    "message_ids": message_ids,
+                                    "delivered_prefix": delivered_prefix,
+                                    "last_message_id": message_ids[-1] if message_ids else None,
+                                    "delivered_parts": index,
+                                    "total_parts": len(parts),
+                                },
+                            )
+                        # First part failed: no partial delivery to preserve.
                         return result
                     raw_ids = (
                         result.raw_response.get("message_ids", [])

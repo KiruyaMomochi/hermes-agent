@@ -281,6 +281,10 @@ class StreamTransportMixin:
             logger.debug("Fresh-final send failed, falling back to edit: %s", e)
             return False
         if not getattr(result, "success", False):
+            # Partial split fanout: enter fallback mode with the delivered prefix so the
+            # finalize path recovers only the unsent tail (True) rather than resending all.
+            if self._handle_partial_overflow(result, text):
+                return True
             return False
         new_message_id = getattr(result, "message_id", None)
         # Best-effort preview cleanup; never delete the message just sent.
@@ -443,6 +447,11 @@ class StreamTransportMixin:
             chat_id=self.chat_id, content=text, reply_to=self._initial_reply_to_id,
             metadata=self._metadata_for_send(final=finalize, expect_edits=not finalize))
         if not result.success:
+            # A split fanout that partially delivered reports partial_overflow: preserve
+            # the delivered prefix so the finalize path sends only the unsent tail instead
+            # of the gateway resending the whole logical response from part 1.
+            if self._handle_partial_overflow(result, text):
+                return False
             self._edit_supported = False
             return False
         self._already_sent = True
@@ -505,6 +514,27 @@ class StreamTransportMixin:
         self._edit_supported = False
         self._already_sent = True
 
+    def _handle_partial_overflow(self, result, text: str) -> bool:
+        """Check SendResult for partial_overflow; enter fallback mode if present. True when handled."""
+        raw_response = getattr(result, "raw_response", None)
+        if not isinstance(raw_response, dict) or not raw_response.get("partial_overflow"):
+            return False
+        # Some overflow chunks landed but not the whole response: preserve the
+        # visible prefix so got_done sends the missing tail.
+        self._message_id = str(raw_response.get("last_message_id") or result.message_id
+                               or self._message_id)
+        delivered_prefix = raw_response.get("delivered_prefix")
+        if isinstance(delivered_prefix, str) and delivered_prefix:
+            self._last_sent_text = delivered_prefix
+            self._fallback_preserve_partial_messages = text.startswith(delivered_prefix)
+            self._enter_fallback_mode(delivered_prefix)
+        else:
+            self._fallback_preserve_partial_messages = False
+            self._enter_fallback_mode(self._visible_prefix())
+        if getattr(result, "continuation_message_ids", ()):
+            self._notify_new_message()
+        return True
+
     async def _on_edit_failure(self, result, text: str, *, finalize: bool, is_turn_final: bool,
                                ) -> bool:
         """Classify a failed edit: partial overflow, flood backoff, or fallback mode.  Always
@@ -537,22 +567,7 @@ class StreamTransportMixin:
         # content IS this finalize payload (#71643). Record it on split turns too: post-#78541 an unrecorded
         # split reads as a mismatch and would re-send this already-visible answer, reintroducing the
         # duplicate #45517 fixed (#36965 / #25349).
-        raw_response = getattr(result, "raw_response", None)
-        if isinstance(raw_response, dict) and raw_response.get("partial_overflow"):
-            # Some overflow chunks landed but not the whole response: preserve the
-            # visible prefix so got_done sends the missing tail.
-            self._message_id = str(raw_response.get("last_message_id") or result.message_id
-                                   or self._message_id)
-            delivered_prefix = raw_response.get("delivered_prefix")
-            if isinstance(delivered_prefix, str) and delivered_prefix:
-                self._last_sent_text = delivered_prefix
-                self._fallback_preserve_partial_messages = text.startswith(delivered_prefix)
-                self._enter_fallback_mode(delivered_prefix)
-            else:
-                self._fallback_preserve_partial_messages = False
-                self._enter_fallback_mode(self._visible_prefix())
-            if getattr(result, "continuation_message_ids", ()):
-                self._notify_new_message()
+        if self._handle_partial_overflow(result, text):
             return False
 
         # Flood control: adaptive backoff (double the interval); disable edits only

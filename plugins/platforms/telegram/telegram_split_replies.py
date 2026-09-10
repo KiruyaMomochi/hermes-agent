@@ -6,21 +6,32 @@ def split_reply_delimited(
     text: str,
     *,
     max_parts: int = 8,
-) -> list[tuple[str, int]]:
+    with_offsets: bool = False,
+):
     """Split on standalone --- lines outside code fences.
-    
+
     Returns list of (content, preceding_dash_count) tuples. The dash count
     controls pause duration between bubbles: --- is the base delay, ----
     is longer, etc.
+
+    ``with_offsets=True`` appends each part's start offset in the ORIGINAL
+    ``text`` as a third tuple element (content, dash_count, start_offset), so a
+    partial fanout failure can slice ``text`` into an exact delivered prefix and
+    an unsent, re-splittable suffix. Offsets point at the first non-stripped
+    character of the part's body (delimiters precede it), so ``text[:offset]``
+    of part N is a genuine prefix ending after part N-1's delimiter.
     """
     if not text or max_parts <= 1:
-        return [(text, 0)]
+        return [(text, 0, 0)] if with_offsets else [(text, 0)]
 
-    parts: list[tuple[str, int]] = []
+    # (content, preceding_dash_count, start_offset)
+    parts: list[tuple[str, int, int]] = []
     current: list[str] = []
+    current_start = 0  # offset in text where the current segment's lines begin
     preceding_dash_count = 0
     in_code_fence = False
     saw_separator = False
+    pos = 0  # running character offset into text
 
     for line in text.splitlines(keepends=True):
         body = line.rstrip("\r\n")
@@ -30,27 +41,38 @@ def split_reply_delimited(
         separator = re.fullmatch(r"-{3,}", stripped)
         if separator and not in_code_fence:
             saw_separator = True
-            part = "".join(current).strip()
+            raw = "".join(current)
+            part = raw.strip()
             if part:
-                parts.append((part, preceding_dash_count))
+                # Offset of the stripped body inside the raw segment (skip leading whitespace).
+                lead = len(raw) - len(raw.lstrip())
+                parts.append((part, preceding_dash_count, current_start + lead))
                 preceding_dash_count = len(stripped)
             current = []
+            current_start = pos + len(line)
+            pos += len(line)
             continue
         current.append(line)
+        pos += len(line)
 
     if not saw_separator:
-        return [(text, 0)]
-    tail = "".join(current).strip()
+        return [(text, 0, 0)] if with_offsets else [(text, 0)]
+    raw_tail = "".join(current)
+    tail = raw_tail.strip()
     if tail:
-        parts.append((tail, preceding_dash_count))
+        lead = len(raw_tail) - len(raw_tail.lstrip())
+        parts.append((tail, preceding_dash_count, current_start + lead))
     if not parts:
-        return [(text, 0)]
+        return [(text, 0, 0)] if with_offsets else [(text, 0)]
     if len(parts) > max_parts:
         head = parts[: max_parts - 1]
         overflow = parts[max_parts - 1 :]
-        merged = "\n\n".join(part for part, _ in overflow)
-        return head + [(merged, overflow[0][1])]
-    return parts
+        merged = "\n\n".join(part for part, _, _ in overflow)
+        # The merged tail begins where the first overflow part begins.
+        parts = head + [(merged, overflow[0][1], overflow[0][2])]
+    if with_offsets:
+        return parts
+    return [(part, dash) for part, dash, _ in parts]
 
 
 def split_reply_delay_seconds(base_delay: float, dash_count: int) -> float:
