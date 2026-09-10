@@ -637,6 +637,44 @@ class TestOpenVikingRead:
 
 
 class TestOpenVikingAutoRecallPrefetch:
+    def test_prefetch_compacts_chatlog_prose_but_preserves_fenced_code(self):
+        uri = "viking://user/default/memories/events/2026/09/10/example.md"
+        content = (
+            "# Summary\n"
+            "First summary paragraph.\n\n\n"
+            "Second summary paragraph.\n"
+            "# 2026-09-10 (Thursday) ChatLog:\n"
+            "**33**: First paragraph.\n\n\n"
+            "Second paragraph.\n\n"
+            "```python\n"
+            "first = 1\n\n\n"
+            "second = 2\n"
+            "```\n\n\n"
+            "After the fence.\n\n"
+            "<!-- MEMORY_FIELDS\n{}\n-->"
+        )
+        client = FakeVikingClient({
+            ("/api/v1/content/read", (("uri", uri),)): {"result": {"content": content}},
+        })
+        provider = OpenVikingMemoryProvider()
+
+        entries = provider._build_prefetch_entries(
+            cast(Any, client),
+            [{"uri": uri, "score": 0.9, "level": 2, "category": "events", "abstract": "ignored"}],
+            prefer_abstract=False,
+            max_injected_chars=10_000,
+            deadline=time.monotonic() + 10,
+            request_timeout=1,
+            full_read_limit=1,
+        )
+
+        recalled = entries[0]
+        assert "First summary paragraph.\n  \n  \n  Second summary paragraph." in recalled
+        assert "**33**: First paragraph.\n  Second paragraph." in recalled
+        assert "first = 1\n  \n  \n  second = 2" in recalled
+        assert "```\n  After the fence." in recalled
+        assert "After the fence.\n  <!-- MEMORY_FIELDS" in recalled
+
     @pytest.mark.parametrize("peer", ["", "hermes"])
     def test_prefetch_e2e_sends_limit_and_reads_l2_content(self, monkeypatch, peer):
         records = {"searches": [], "reads": [], "listings": [], "headers": []}

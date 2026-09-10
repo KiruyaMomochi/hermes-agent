@@ -71,6 +71,12 @@ _READ_BATCH_FULL_LIMIT = 2500
 _LEVEL_ENDPOINTS = {"abstract": "/api/v1/content/abstract", "overview": "/api/v1/content/overview", "full": "/api/v1/content/read"}
 _LEVEL_MAX_CHARS = {"abstract": 1200, "overview": 4000}
 _RECALL_SUMMARY_KEYS = ("abstract", "overview", "text", "content")
+_CHATLOG_SECTION_RE = re.compile(
+    r"(?P<header>^[ \t]*(?:#{1,6}[ \t]*)?(?:\d{4}-\d{2}-\d{2}(?:[ \t]+\([^)]+\))?[ \t]+)?"
+    r"ChatLog:[ \t]*(?:\n|$))(?P<body>.*?)(?=^[ \t]*<!--[ \t]*MEMORY_FIELDS\b|\Z)",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+_CODE_FENCE_LINE_RE = re.compile(r"^[ \t]*`{3,}[^\n]*$", re.MULTILINE)
 
 
 def _cfg_field(key: str, description: str, **extra) -> dict:
@@ -193,6 +199,29 @@ def _derive_openviking_user_text(content: Any) -> str:
     """Strip Hermes slash-skill scaffolding before sending content to OpenViking
     (MemoryManager already does this for the fan-out; kept for direct hook callers)."""
     return extract_user_instruction_from_skill_message(content) or ""
+
+
+def _compact_recalled_chatlogs(content: str) -> str:
+    """Collapse blank lines in recalled ChatLog bodies without changing fenced code."""
+
+    def compact_outside_fences(body: str) -> str:
+        parts: List[str] = []
+        cursor = 0
+        in_fence = False
+        for fence in _CODE_FENCE_LINE_RE.finditer(body):
+            segment = body[cursor:fence.start()]
+            parts.append(segment if in_fence else re.sub(r"\n{2,}", "\n", segment))
+            parts.append(fence.group(0))
+            cursor = fence.end()
+            in_fence = not in_fence
+        remainder = body[cursor:]
+        parts.append(remainder if in_fence else re.sub(r"\n{2,}", "\n", remainder))
+        return "".join(parts)
+
+    return _CHATLOG_SECTION_RE.sub(
+        lambda match: match.group("header") + compact_outside_fences(match.group("body")),
+        content,
+    )
 
 
 def _preview(value: Any, limit: int = 160) -> str:
@@ -1978,6 +2007,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
                     logger.debug("OpenViking prefetch full read failed for %s: %s", uri, e)
             if not content:
                 continue
+            content = _compact_recalled_chatlogs(content)
             category = str(item.get("category") or "").strip() or "memory"
             entry = "\n".join([f"- [{category}]", f"  <uri>{item.get('uri', '')}</uri>", *[f"  {line}" for line in content.splitlines()]])
             projected_chars = total_chars + (1 if entries else 0) + len(entry)
