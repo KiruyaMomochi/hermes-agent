@@ -29,7 +29,7 @@ def telegram_adapter() -> TelegramAdapter:
 async def test_delimiter_fanout_failure_on_last_part_preserves_prefix_receipts(telegram_adapter):
     """When part N fails after parts 1..N-1 succeed, adapter returns partial_overflow with receipts."""
     content = "First bubble\n\n---\n\nSecond bubble\n\n---\n\nThird bubble (fails)"
-    
+
     # Mock: parts 1 and 2 succeed, part 3 fails.
     telegram_adapter._bot.send_message = AsyncMock(
         side_effect=[
@@ -38,9 +38,9 @@ async def test_delimiter_fanout_failure_on_last_part_preserves_prefix_receipts(t
             RuntimeError("telegram send failed"),
         ]
     )
-    
+
     result = await telegram_adapter.send("12345", content, reply_to=None, metadata={})
-    
+
     assert result.success is False
     assert result.message_id == "102"  # last successful
     assert result.raw_response["partial_overflow"] is True
@@ -58,13 +58,13 @@ async def test_delimiter_fanout_failure_on_last_part_preserves_prefix_receipts(t
 async def test_delimiter_fanout_failure_on_first_part_returns_plain_failure(telegram_adapter):
     """When the first part fails, there's no partial delivery to preserve."""
     content = "First bubble (fails)\n\n---\n\nSecond bubble"
-    
+
     telegram_adapter._bot.send_message = AsyncMock(
         side_effect=RuntimeError("telegram send failed")
     )
-    
+
     result = await telegram_adapter.send("12345", content, reply_to=None, metadata={})
-    
+
     assert result.success is False
     # No partial_overflow when nothing was delivered.
     assert result.raw_response is None or not result.raw_response.get("partial_overflow")
@@ -78,9 +78,9 @@ async def test_consumer_enters_fallback_on_partial_fanout_first_send(telegram_ad
         chat_id="12345",
         config=StreamConsumerConfig(),
     )
-    
+
     content = "Part A\n\n---\n\nPart B\n\n---\n\nPart C (fails)"
-    
+
     telegram_adapter._bot.send_message = AsyncMock(
         side_effect=[
             _message(201),
@@ -88,10 +88,10 @@ async def test_consumer_enters_fallback_on_partial_fanout_first_send(telegram_ad
             RuntimeError("telegram send failed"),
         ]
     )
-    
+
     # Simulate the finalize send path through _first_send.
     success = await consumer._first_send(content, finalize=True)
-    
+
     # Partial delivery: _first_send returns False, but fallback mode is armed.
     assert success is False
     assert consumer._fallback_final_send is True
@@ -109,9 +109,9 @@ async def test_consumer_fallback_recovers_unsent_tail_after_partial_fanout(teleg
         chat_id="12345",
         config=StreamConsumerConfig(),
     )
-    
+
     content = "Delivered A\n\n---\n\nDelivered B\n\n---\n\nMissing C"
-    
+
     # First attempt: parts 1-2 succeed, part 3 fails → partial_overflow.
     telegram_adapter._bot.send_message = AsyncMock(
         side_effect=[
@@ -120,18 +120,18 @@ async def test_consumer_fallback_recovers_unsent_tail_after_partial_fanout(teleg
             RuntimeError("telegram send failed"),
         ]
     )
-    
+
     success = await consumer._first_send(content, finalize=True)
     assert success is False
     assert consumer._fallback_final_send is True
-    
+
     # Now simulate got_done calling _send_fallback_final to recover the tail.
     telegram_adapter._bot.send_message = AsyncMock(
         side_effect=[_message(303)]
     )
-    
+
     await consumer._send_fallback_final(content)
-    
+
     # Fallback should have sent only the continuation (the missing tail).
     sent_calls = telegram_adapter._bot.send_message.call_args_list
     assert len(sent_calls) == 1
@@ -149,15 +149,15 @@ async def test_consumer_fallback_recovers_unsent_tail_after_partial_fanout(teleg
 async def test_split_with_offsets_returns_accurate_part_boundaries():
     """split_reply_delimited(with_offsets=True) returns correct start offsets."""
     from plugins.platforms.telegram.telegram_split_replies import split_reply_delimited
-    
+
     text = "First\n\n---\n\nSecond\n\n-----\n\nThird"
     parts = split_reply_delimited(text, with_offsets=True)
-    
+
     assert len(parts) == 3
     assert parts[0] == ("First", 0, 0)
     assert parts[1] == ("Second", 3, text.find("Second"))
     assert parts[2] == ("Third", 5, text.find("Third"))
-    
+
     # Verify offsets produce valid prefixes.
     for i in range(1, len(parts)):
         _, _, offset = parts[i]

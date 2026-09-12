@@ -1972,4 +1972,3 @@ class TestOpenRouterRoutingVariantContextLength:
         assert variant_ctx == base_ctx == 2_000_000
         assert variant_ctx != DEFAULT_CONTEXT_LENGTHS.get("grok")
         assert get_model_context_length("thinkingmachines/inkling:free", provider="openrouter") == 64_000
-

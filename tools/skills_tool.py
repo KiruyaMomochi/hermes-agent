@@ -177,15 +177,18 @@ def _skill_search_dirs() -> Tuple[list, list, Path]:
     """(project_dirs, all_dirs, active_skills_dir); trusted project-local dirs come FIRST so
     first-wins dedup / the collision resolver prefer them."""
     from agent.skill_utils import (
+        get_all_skills_dirs,
         get_bundled_skills_dir,
         get_project_skills_dirs,
-        get_scan_ordered_skills_dirs,
         get_skills_dir,
     )
     project_dirs = list(get_project_skills_dirs())
     active_skills_dir = _skills_dir()
     profile_root = get_skills_dir().resolve()
-    all_dirs = [active_skills_dir if path == profile_root else path for path in get_scan_ordered_skills_dirs()]
+    all_dirs = project_dirs + [
+        active_skills_dir if path == profile_root else path
+        for path in get_all_skills_dirs()
+    ]
     # Tests and embedded callers may override the active root independently of
     # the profile resolver. In that case the override is a complete scan root;
     # do not leak the source checkout's bundled skills into the isolated scan.
