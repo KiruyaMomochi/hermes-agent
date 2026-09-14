@@ -434,8 +434,29 @@ class TelegramAdapter(BasePlatformAdapter):
         self._bot: Optional[Bot] = None
         self._webhook_mode: bool = False
         self._mention_patterns = self._compile_mention_patterns()
-        self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
+        configured_reply_mode = getattr(config, 'reply_to_mode', 'first') or 'first'
+        self._reply_to_mode = "off" if configured_reply_mode == "off" else "first"
         self._disable_link_previews: bool = self._coerce_bool_extra("disable_link_previews", False)
+        # --- split replies: agent writes standalone --- lines to separate bubbles
+        split_cfg = extra.get("split_replies", {})
+        if not isinstance(split_cfg, dict):
+            split_cfg = {"enabled": split_cfg}
+        split_enabled = split_cfg.get("enabled", False)
+        self._split_replies_enabled = (
+            split_enabled
+            if isinstance(split_enabled, bool)
+            else str(split_enabled).strip().lower() in {"1", "true", "yes", "on"}
+        )
+        try:
+            split_delay_ms = float(split_cfg.get("delay_between_ms", 350))
+        except (TypeError, ValueError):
+            split_delay_ms = 350.0
+        self._split_replies_delay_seconds = max(0.0, min(split_delay_ms, 5000.0)) / 1000.0
+        try:
+            split_max_parts = int(split_cfg.get("max_parts", 8))
+        except (TypeError, ValueError):
+            split_max_parts = 8
+        self._split_replies_max_parts = max(2, min(split_max_parts, 20))
         # Bot API 10.1 Rich Messages render what MarkdownV2 degrades (tables, task lists, <details>, block
         # math). Opt-in: current clients make rich messages hard to copy as plain text. rich_drafts is a
         # separate opt-in (Desktop can leave rich draft frames overlaid): off keeps native draft transport
@@ -3247,11 +3268,8 @@ class TelegramAdapter(BasePlatformAdapter):
         """Whether this chunk (0 = first) should reply-thread to ``reply_to``, per reply_to_mode."""
         if not reply_to:
             return False
-        mode = self._reply_to_mode
-        if mode == "off":
+        if self._reply_to_mode == "off":
             return False
-        if mode == "all":
-            return True
         return chunk_index == 0  # "first" (default)
 
     @staticmethod
@@ -3414,6 +3432,103 @@ class TelegramAdapter(BasePlatformAdapter):
         # Skip whitespace-only text to prevent Telegram 400 empty-text errors.
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
+
+        # --- split replies: separate bubbles on standalone --- lines
+        split_metadata = dict(metadata or {})
+        if getattr(self, "_split_replies_enabled", False):
+            from plugins.platforms.telegram.telegram_split_replies import (
+                split_reply_delimited,
+                split_reply_delay_seconds,
+            )
+
+            parts = split_reply_delimited(
+                content, max_parts=getattr(self, "_split_replies_max_parts", 8),
+                with_offsets=True,
+            )
+            if len(parts) > 1:
+                message_ids: list[str] = []
+                for index, (part, dash_count, part_offset) in enumerate(parts):
+                    if index:
+                        delay = split_reply_delay_seconds(
+                            getattr(self, "_split_replies_delay_seconds", 0.0), dash_count
+                        )
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                    part_reply_to = reply_to if index == 0 else None
+                    result = await self._send_single_message(
+                        chat_id, part, part_reply_to, split_metadata,
+                    )
+                    # trace_sends: per-split-part outcome (index/total/result only; no content/PII).
+                    self._trace_send(
+                        "split_part", index=index, total=len(parts), success=result.success,
+                        retryable=result.retryable, error_kind=result.error_kind,
+                        retry_after=result.retry_after, delivered=len(message_ids),
+                    )
+                    if not result.success:
+                        # Partial fanout: some parts delivered, this one failed. Preserve receipts
+                        # and signal partial_overflow so the consumer can recover the unsent tail.
+                        if index > 0:
+                            delivered_prefix = content[:part_offset].rstrip()
+                            return SendResult(
+                                success=False,
+                                message_id=message_ids[-1] if message_ids else None,
+                                error=result.error,
+                                retryable=result.retryable,
+                                retry_after=result.retry_after,
+                                error_kind=result.error_kind,
+                                raw_response={
+                                    "partial_overflow": True,
+                                    "message_ids": message_ids,
+                                    "delivered_prefix": delivered_prefix,
+                                    "last_message_id": message_ids[-1] if message_ids else None,
+                                    "delivered_parts": index,
+                                    "total_parts": len(parts),
+                                },
+                            )
+                        # First part failed: no partial delivery to preserve.
+                        return result
+                    raw_ids = (
+                        result.raw_response.get("message_ids", [])
+                        if isinstance(result.raw_response, dict)
+                        else []
+                    )
+                    if raw_ids:
+                        message_ids.extend(str(v) for v in raw_ids)
+                    elif result.message_id is not None:
+                        message_ids.append(str(result.message_id))
+                return SendResult(
+                    success=True,
+                    message_id=message_ids[-1] if message_ids else None,
+                    raw_response={"message_ids": message_ids},
+                )
+
+        return await self._send_single_message(chat_id, content, reply_to, metadata)
+
+    async def send_reasoning(
+        self, chat_id: str, content: str, metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send one reasoning bubble without applying delimiter split planning."""
+        if not self._bot:
+            live = self._replacement_telegram_adapter()
+            if live is not None:
+                return await live.send_reasoning(chat_id, content, metadata)
+            if self._is_permanent_fatal() or not await self._wait_for_reconnection():
+                return SendResult(success=False, error="Not connected", retryable=not self._is_permanent_fatal())
+            live = self._replacement_telegram_adapter()
+            if not self._bot and live is not None:
+                return await live.send_reasoning(chat_id, content, metadata)
+            if not self._bot:
+                return SendResult(success=False, error="Not connected", retryable=True)
+        if getattr(self, "_send_path_degraded", False):
+            return SendResult(success=False, error="send_path_degraded", retryable=True)
+        if not content or not content.strip():
+            return SendResult(success=True, message_id=None)
+        return await self._send_single_message(chat_id, content, None, metadata)
+
+    async def _send_single_message(
+        self, chat_id: str, content: str, reply_to: Optional[str], metadata: Optional[Dict[str, Any]],
+    ) -> SendResult:
+        """Send one message payload without delimiter split planning."""
         error_types = self._telegram_error_types()
         try:
             # Bot API 10.1 rich fast-path; falls through to legacy MarkdownV2 on permanent/capability
@@ -6755,6 +6870,8 @@ def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:
     for _key in ("guest_mode", "disable_link_previews", "observe_unmentioned_group_messages", "free_response_topics"):
         if _key in telegram_cfg:
             extras.setdefault(_key, telegram_cfg[_key])
+    if "split_replies" in telegram_cfg:
+        extras.setdefault("split_replies", telegram_cfg["split_replies"])
     # Pass through telegram-specific extra keys but EXCLUDE generic shared-config keys: _merge_platform_map
     # already applied top-level-over-nested precedence and re-emitting them via dict.update() would undo it.
     _GENERIC_MERGE_KEYS = {
