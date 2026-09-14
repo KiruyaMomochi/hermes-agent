@@ -153,12 +153,22 @@ class GatewayTurnPersistenceMixin:
     }
 
     def _hmwa_prepend_reasoning(self, agent_result, response, source, _intentional_silence):
-        """Prepend the last reasoning block when show_reasoning is on for this platform. Mattermost
-        requires an explicit per-platform opt-in (scratch text, not final-answer content)."""
+        """Keep the combined display used by non-Telegram platforms."""
+        if source.platform == Platform.TELEGRAM:
+            return response
+        reasoning = self._hmwa_reasoning_message(
+            agent_result.get("last_reasoning"), source, _intentional_silence,
+        )
+        if reasoning and response.startswith(f"{reasoning}\n\n"):
+            return response
+        return f"{reasoning}\n\n{response}" if reasoning and response else response
+
+    def _hmwa_reasoning_message(self, last_reasoning, source, _intentional_silence):
+        """Build the visible reasoning block under the existing per-platform display gate."""
         if source.platform == Platform.LOCAL and not _acp_launch(self, source):
             # Local viewers receive reasoning.delta through their event stream; projecting it into
             # the final response duplicates it and leaks messaging-platform formatting into Desktop.
-            return response
+            return ""
         from gateway.run import _load_gateway_config, _platform_config_key, _resolve_gateway_display_bool
         try:
             _show_reasoning_effective = _resolve_gateway_display_bool(
@@ -170,9 +180,8 @@ class GatewayTurnPersistenceMixin:
             _show_reasoning_effective = (
                 False if source.platform == Platform.MATTERMOST else getattr(self, "_show_reasoning", False)
             )
-        last_reasoning = agent_result.get("last_reasoning")
-        if not (_show_reasoning_effective and response and not _intentional_silence and last_reasoning):
-            return response
+        if not (_show_reasoning_effective and not _intentional_silence and last_reasoning):
+            return ""
         from gateway.stream_consumer_fences import escape_code_fences_for_display
         # Collapse long reasoning to keep messages readable
         lines = last_reasoning.strip().splitlines()
@@ -192,10 +201,24 @@ class GatewayTurnPersistenceMixin:
         if _quote:
             header_key, prefix, empty = _quote
             _quoted = "\n".join(f"{prefix}{ln}" if ln else empty for ln in display_reasoning.splitlines())
-            return f"{t(header_key)}\n{_quoted}\n\n{response}"
+            return f"{t(header_key)}\n{_quoted}"
         # Escape ``` inside reasoning so inner fences don't break the outer code block.
         display_reasoning = escape_code_fences_for_display(display_reasoning)
-        return t("gateway.reasoning.block", reasoning=display_reasoning, response=response)
+        return t("gateway.reasoning.block", reasoning=display_reasoning, response="").rstrip("\n")
+
+    async def _hmwa_deliver_telegram_reasoning(self, reasoning, source, metadata=None) -> None:
+        """Deliver Telegram reasoning once through the adapter's unsplit public operation."""
+        message = self._hmwa_reasoning_message(reasoning, source, False)
+        adapter = self._delivery_adapter_for(source)
+        send_reasoning = getattr(adapter, "send_reasoning", None)
+        if not message or not callable(send_reasoning):
+            return
+        try:
+            result = send_reasoning(source.chat_id, message, metadata=metadata)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            logger.debug("Telegram reasoning send failed: %s", exc)
 
     def _hmwa_runtime_footer_line(self, agent_result, source, _turn_seconds):
         """Runtime-metadata footer for the FINAL message of the turn; off by default
