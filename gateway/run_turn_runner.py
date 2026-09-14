@@ -1032,7 +1032,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             )
         ctx.result_holder[0] = result
         if stream_consumer is None:
-            return
+            return result.get("final_response") if isinstance(result, dict) else None
         # Pass final_response as the authoritative finalize payload: it includes post-stream
         # augmentation (verifier footer, explainer) the accumulator never saw. Adopt ONLY a genuinely
         # completed final: interrupt paths return {interrupted: True, completed: False} with a
@@ -1046,14 +1046,19 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             fr = result.get("final_response")
             if isinstance(fr, str) and fr.strip() and fr != "(empty)":
                 _final_for_stream = fr
+                if str(getattr(ctx.source.platform, "value", ctx.source.platform)) != "telegram":
+                    _final_for_stream = self._runner._hmwa_prepend_reasoning(
+                        result, fr, ctx.source, False,
+                    )
         if _final_for_stream is None:
             stream_consumer.finish()
-            return
+            return result.get("final_response") if isinstance(result, dict) else None
         # Duck-type safe: test doubles / older consumers may expose a zero-arg finish().
         try:
             stream_consumer.finish(_final_for_stream)
         except TypeError:
             stream_consumer.finish()
+        return _final_for_stream
 
     def _restore_telegram_thread_id_after_split(self, agent_session_id) -> None:
         """Telegram DM whose source.thread_id was lost in the session split (synthetic/recovered
@@ -1335,17 +1340,22 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 from gateway.session_local_inventory import publish_settled_info
                 publish_settled_info(self, agent)
         persisted_turn = _persisted_turn(agent, agent_history, result, compressions)
-        self._finish_stream_consumer(result, agent_history, stream_consumer)
+        canonical_final_response = result.get("final_response")
+        streamed_delivery_response = self._finish_stream_consumer(result, agent_history, stream_consumer)
         if _finite_viewer_turn() and getattr(agent, "_codex_session", None) is not None:
             # The classic `chat -q` process exit bounded the codex app-server child; a finite turn
             # hosted here must too, or every one-shot leaves one running until the idle-TTL sweep.
             # Like a fresh process, the next turn respawns it and resumes the stored thread.
             agent._close_codex_session()
             agent._codex_session_prompt = None
+
         # The streaming-TTS consumer's finish() runs on the outer loop thread after the executor
         # returns, so early run_sync returns are also finalised.
         # See the outer finally/completion section below. See #60671.
-        final_response = result.get("final_response")
+        final_response = streamed_delivery_response
+        # Keep the exact payload handed to finish() separate from later display-only
+        # decoration (reasoning, footer, and other gateway presentation).
+
         # Actual token counts from the agent instance used for this run.
         agent = ctx.agent_holder[0]
         has_comp = bool(agent) and hasattr(agent, "context_compressor")
@@ -1409,17 +1419,20 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             # viewer's turn); the caller defaults agent_persisted differently when the key is absent.
             if local_sinks is not None:
                 return {
-                    "final_response": final_response, **common, **viewer_meta,
+                    "final_response": final_response, "_canonical_final_response": canonical_final_response,
+                    **common, **viewer_meta,
                     "last_reasoning": result.get("last_reasoning"),
                     "response_previewed": previewed,
                     "response_transformed": bool(result.get("response_transformed")),
                 }
-            return {"final_response": final_response, **common}
+            return {"final_response": final_response, "_canonical_final_response": canonical_final_response, **common}
         final_response = self._append_auto_media_tags(final_response, result, agent_history, history_media_paths)
         # Auto-titling runs at TURN START (agent/turn_context.py) from the user's message alone, so a
         # failed/interrupted turn is still titled.
         return {
-            "final_response": final_response, "last_reasoning": result.get("last_reasoning"), **common, **viewer_meta,
+            "final_response": final_response, "_canonical_final_response": canonical_final_response,
+            "_streamed_delivery_response": streamed_delivery_response,
+            "last_reasoning": result.get("last_reasoning"), **common, **viewer_meta,
             "response_previewed": previewed,
             "response_transformed": result.get("response_transformed", False),
             "response_reused": result.get("response_reused", False),
