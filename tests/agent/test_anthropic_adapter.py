@@ -1312,7 +1312,7 @@ class TestThinkingBlockSignatureManagement:
 
 
     def test_multi_turn_conversation_preserves_intact_historical_thinking(self):
-        """A model that preserves prior thinking retains intact historical signatures."""
+        """Message age and model generation do not invalidate an intact thinking signature."""
         messages = [
             {"role": "user", "content": "Question 1"},
             {
@@ -1339,7 +1339,7 @@ class TestThinkingBlockSignatureManagement:
                 ],
             },
         ]
-        _, result = convert_messages_to_anthropic(messages, model="claude-opus-4-6")
+        _, result = convert_messages_to_anthropic(messages, model="claude-sonnet-4-20250514")
 
         assistants = [m for m in result if m["role"] == "assistant"]
         assert len(assistants) == 3

@@ -11,7 +11,6 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.image_eviction_policy import outbound_image_retire_count
-from agent.anthropic_thinking_policy import anthropic_thinking_route, model_preserves_prior_thinking
 
 logger = logging.getLogger(__name__)
 
@@ -505,7 +504,7 @@ def _strip_orphaned_tool_blocks(result: List[Dict[str, Any]]) -> None:
         kept = [b for b in m["content"] if not (_block_type(b) == "tool_use" and b.get("id") in orphaned)]
         # A signed thinking block on this turn was signed against the ORIGINAL content and is now
         # dead (400 "thinking blocks in the latest assistant message cannot be modified"). Flag so
-        # _manage_thinking_signatures demotes it.
+        # _manage_thinking_signatures drops it.
         if len(kept) != len(m["content"]) and _has_block_type(m["content"], _THINKING_TYPES):
             m["_thinking_signature_invalidated"] = True
         m["content"] = kept if kept else [_text_block("(tool call removed)")]
@@ -553,55 +552,29 @@ def _merge_consecutive_roles(result: List[Dict[str, Any]]) -> List[Dict[str, Any
 
 
 def _keep_valid_thinking(content: List[Any], signature_dead: bool) -> List[Any]:
-    """Keep valid signed Anthropic thinking, demoting readable unsigned/invalidated thinking.
-    Preserved-thinking models apply this to historical turns too; older models apply it only
-    to the latest assistant turn."""
-
+    """Preserve intact thinking blocks and drop blocks invalidated by local repair."""
     new_content = []
     for b in content:
         if _block_type(b) not in _THINKING_TYPES:
             new_content.append(b)
             continue
         is_redacted = b.get("type") == "redacted_thinking"
-        if is_redacted and not b.get("data"):
+        if signature_dead or (is_redacted and not b.get("data")):
             continue
-        if not signature_dead:
-            new_content.append(b)
-        elif not is_redacted and b.get("thinking"):
-            new_content.append(_text_block(b["thinking"]))
+        new_content.append(b)
     return new_content
 
 
 def _manage_thinking_signatures(result: List[Dict[str, Any]], base_url: str | None, model: str | None) -> None:
-    """Replay intact thinking according to the endpoint and model's signature policy.
+    """Replay every intact Anthropic thinking block regardless of endpoint, model or message age.
 
-    Anthropic signs thinking blocks against the full turn; any upstream mutation invalidates them
-    (400 "Invalid signature in thinking block"). Native preserved-thinking models keep valid signed
-    blocks on every assistant turn; older Claude models retain the established latest-turn-only
-    policy. Signatures are proprietary: third-party endpoints strip all thinking. Kimi replays as-is;
-    DeepSeek needs unsigned blocks round-tripped but rejects signed ones. Nous Portal proxies Claude
-    with sticky sessions and validates the same signatures, so it takes the native path despite not
-    being anthropic.com.
+    Only a local mutation during tool-pair repair invalidates a block. ``base_url`` and ``model``
+    remain parameters of the conversion contract but do not decide whether stored reasoning is
+    replayed. A block the server later rejects is filtered by ``agent.anthropic_thinking_replay``.
     """
-    route = anthropic_thinking_route(base_url, model)
-    last_assistant_idx = next((i for i in range(len(result) - 1, -1, -1) if result[i].get("role") == "assistant"), None)
-    preserve_prior = model_preserves_prior_thinking(model)
-    for idx, m in _assistant_block_lists(result):
-        if route == "kimi":
-            pass  # shared cleanup below still strips cache markers + the flag
-        elif route == "deepseek":
-            # Strip signed (or redacted-with-data), keep unsigned.
-            new_content = [
-                b for b in m["content"]
-                if _block_type(b) not in _THINKING_TYPES or not (b.get("signature") or b.get("data"))
-            ]
-            m["content"] = new_content or [_text_block("(empty)")]
-        elif route == "third_party" or (idx != last_assistant_idx and not preserve_prior):
-            m["content"] = _strip_thinking(m["content"]) or [_text_block("(thinking elided)")]
-        else:
-            new_content = _keep_valid_thinking(m["content"], bool(m.get("_thinking_signature_invalidated")))
-            m["content"] = new_content or [_text_block("(empty)")]
-
+    for _, m in _assistant_block_lists(result):
+        new_content = _keep_valid_thinking(m["content"], bool(m.get("_thinking_signature_invalidated")))
+        m["content"] = new_content or [_text_block("(empty)")]
         # cache_control on thinking blocks interferes with signature validation.
         for b in m["content"]:
             if _block_type(b) in _THINKING_TYPES:
