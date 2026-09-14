@@ -556,22 +556,24 @@ def _keep_valid_thinking(content: List[Any], signature_dead: bool) -> List[Any]:
     """Keep valid signed Anthropic thinking, demoting readable unsigned/invalidated thinking.
     Preserved-thinking models apply this to historical turns too; older models apply it only
     to the latest assistant turn."""
+
     new_content = []
     for b in content:
         if _block_type(b) not in _THINKING_TYPES:
             new_content.append(b)
             continue
         is_redacted = b.get("type") == "redacted_thinking"
-        signed = b.get("data") if is_redacted else b.get("signature")  # redacted 'data' IS the signature
-        if signed and not signature_dead:
+        if is_redacted and not b.get("data"):
+            continue
+        if not signature_dead:
             new_content.append(b)
-        elif (signature_dead or not is_redacted) and b.get("thinking"):
-            new_content.append(_text_block(b["thinking"]))  # demote to plain text; dataless redacted dropped
+        elif not is_redacted and b.get("thinking"):
+            new_content.append(_text_block(b["thinking"]))
     return new_content
 
 
 def _manage_thinking_signatures(result: List[Dict[str, Any]], base_url: str | None, model: str | None) -> None:
-    """Strip or preserve thinking blocks per endpoint. Mutates ``result`` in place.
+    """Replay intact thinking according to the endpoint and model's signature policy.
 
     Anthropic signs thinking blocks against the full turn; any upstream mutation invalidates them
     (400 "Invalid signature in thinking block"). Native preserved-thinking models keep valid signed
@@ -599,6 +601,7 @@ def _manage_thinking_signatures(result: List[Dict[str, Any]], base_url: str | No
         else:
             new_content = _keep_valid_thinking(m["content"], bool(m.get("_thinking_signature_invalidated")))
             m["content"] = new_content or [_text_block("(empty)")]
+
         # cache_control on thinking blocks interferes with signature validation.
         for b in m["content"]:
             if _block_type(b) in _THINKING_TYPES:
@@ -716,9 +719,8 @@ def convert_messages_to_anthropic(
 ) -> Tuple[Optional[Any], List[Dict]]:
     """Convert OpenAI-format messages to Anthropic format -> ``(system, messages)``. System is
     extracted into its own param (a string, or a block list when cache_control is present).
-    ``base_url``/``model`` drive thinking-signature policy — third-party endpoints strip signatures
-    (proprietary, they 400 on them); Kimi-family endpoints/models keep unsigned
-    reasoning_content-derived blocks, which Kimi requires even when empty."""
+    Historical thinking blocks replay uniformly; ``base_url`` and ``model`` are accepted for the
+    surrounding transport contract, not as reasoning-validity heuristics."""
     system = None
     result: List[Dict[str, Any]] = []
     for m in messages:
