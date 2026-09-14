@@ -1,23 +1,4 @@
-"""Regression guard: preserve thinking blocks on DeepSeek's /anthropic endpoint.
-
-DeepSeek's ``api.deepseek.com/anthropic`` route speaks the Anthropic Messages
-protocol but, when thinking mode is enabled, requires ``thinking`` blocks from
-prior assistant turns to round-trip on subsequent requests.  The generic
-third-party path strips them (signatures are Anthropic-proprietary and other
-proxies cannot validate them), so without a DeepSeek-specific carve-out the
-next tool-call turn fails with HTTP 400::
-
-    The content[].thinking in the thinking mode must be passed back to the
-    API.
-
-DeepSeek's compatibility matrix lists ``thinking`` as supported but
-``redacted_thinking`` and ``cache_control`` on thinking blocks as not
-supported.  Handling is the same as Kimi's ``/coding`` endpoint: strip
-Anthropic-signed blocks (DeepSeek can't validate them) but preserve unsigned
-blocks that Hermes synthesises from ``reasoning_content``.
-
-See hermes-agent#16748.
-"""
+"""Regression guards for uniform Anthropic-format thinking replay."""
 
 from __future__ import annotations
 
@@ -29,12 +10,8 @@ class TestDeepSeekAnthropicPreservesThinking:
 
 
 
-    def test_signed_anthropic_thinking_block_is_stripped(self) -> None:
-        """Anthropic-signed blocks (that leaked through) must still be stripped.
-
-        DeepSeek issues its own signatures and cannot validate Anthropic's —
-        the strip-signed / keep-unsigned split matches the Kimi policy.
-        """
+    def test_signed_anthropic_thinking_block_is_preserved(self) -> None:
+        """Endpoint identity does not alter intact signed thinking blocks."""
         from agent.anthropic_message_convert import convert_messages_to_anthropic
 
         messages = [
@@ -61,10 +38,7 @@ class TestDeepSeekAnthropicPreservesThinking:
             b for b in assistant_msg["content"]
             if isinstance(b, dict) and b.get("type") == "thinking"
         ]
-        assert thinking_blocks == [], (
-            "Signed Anthropic thinking blocks must be stripped on DeepSeek — "
-            "DeepSeek cannot validate Anthropic-proprietary signatures."
-        )
+        assert thinking_blocks == [messages[1]["content"][0]]
 
     def test_cache_control_stripped_from_thinking_block(self) -> None:
         """cache_control must still be stripped even when the block is preserved.
@@ -114,13 +88,7 @@ def test_deepseek_model_name_does_not_override_native_signature_contract(url):
     assert messages[0]["content"][0] == block
 
 
-@pytest.mark.parametrize(("model", "kept"), [
-    ("vendor/deepseek-v4", [{"type": "thinking", "thinking": "unsigned"}]),  # thinking family: keep unsigned only
-    (" DeepSeek-Pro ", [{"type": "thinking", "thinking": "unsigned"}]),
-    ("deepseek-chat", []),  # non-thinking DeepSeek and unrelated models: generic third-party strip
-    ("vendor/other-model", []),
-])
-def test_deepseek_proxy_keeps_unsigned_thinking_in_older_tool_turns_only(model, kept):
+def test_proxy_replays_all_intact_thinking_in_older_tool_turns():
     import copy
     from agent.anthropic_message_convert import convert_messages_to_anthropic
     history = [
@@ -134,7 +102,11 @@ def test_deepseek_proxy_keeps_unsigned_thinking_in_older_tool_turns_only(model, 
         {"role": "assistant", "content": "done"},
     ]
     snapshot = copy.deepcopy(history)
-    _, result = convert_messages_to_anthropic(history, base_url="https://proxy.example/anthropic", model=model)
+    _, result = convert_messages_to_anthropic(history, base_url="https://proxy.example/anthropic", model="vendor/other-model")
     assistant = next(m for m in result if m["role"] == "assistant")
-    assert [b for b in assistant["content"] if b.get("type") in {"thinking", "redacted_thinking"}] == kept
+    assert [b for b in assistant["content"] if b.get("type") in {"thinking", "redacted_thinking"}] == [
+        {"type": "thinking", "thinking": "unsigned"},
+        {"type": "thinking", "thinking": "foreign signed", "signature": "sig"},
+        {"type": "redacted_thinking", "data": "redacted-signature"},
+    ]
     assert history == snapshot

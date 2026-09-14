@@ -1,4 +1,4 @@
-"""Kimi-family endpoints don't need thinking blocks stripped on replay; DeepSeek does."""
+"""Anthropic-format endpoints replay intact blocks and demote invalidated ones."""
 
 from types import SimpleNamespace
 
@@ -64,8 +64,7 @@ def test_kimi_model_name_on_foreign_gateway_keeps_thinking():
 def test_orphan_tool_turn_demotes_and_leaks_no_internal_marker():
     """Signed thinking + parallel tool batch interrupted mid-flight (one orphan):
     the internal _thinking_signature_invalidated marker must be popped —
-    never leak into the Kimi payload — while the thinking block itself
-    replays as-is (Kimi does not enforce signatures)."""
+    never leak into the Kimi payload — and the invalidated thinking demotes."""
     response = SimpleNamespace(
         content=[
             SimpleNamespace(type="thinking", thinking="plan both reads", signature=SIG),
@@ -101,7 +100,5 @@ def test_orphan_tool_turn_demotes_and_leaks_no_internal_marker():
         f"internal marker leaked into Kimi payload: {assistant.keys()}"
     )
     types = [b.get("type") for b in assistant["content"] if isinstance(b, dict)]
-    assert "thinking" in types, (
-        "Kimi does not enforce signatures — even orphan-invalidated blocks "
-        f"must replay as-is: {types}"
-    )
+    assert "thinking" not in types
+    assert {"type": "text", "text": "plan both reads"} in assistant["content"]

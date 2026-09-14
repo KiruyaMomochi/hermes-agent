@@ -1223,8 +1223,7 @@ class TestRoleAlternation:
 
 
 class TestThinkingBlockSignatureManagement:
-    """Tests for the thinking block handling strategy:
-    strip from old turns, preserve latest signed, downgrade unsigned."""
+    """Thinking blocks replay verbatim until repair makes their signatures invalid."""
 
 
 
@@ -1247,7 +1246,7 @@ class TestThinkingBlockSignatureManagement:
         assert redacted[0]["data"] == "opaque_signature_data"
 
     def test_redacted_thinking_without_data_dropped(self):
-        """Redacted thinking without 'data' is dropped — can't be validated."""
+        """A redacted block without authenticated data has nothing to replay."""
         messages = [
             {
                 "role": "assistant",
@@ -1259,7 +1258,7 @@ class TestThinkingBlockSignatureManagement:
             },
         ]
         _, result = convert_messages_to_anthropic(messages)
-        blocks = result[0]["content"]
+        blocks = next(m for m in result if m["role"] == "assistant")["content"]
         assert not any(b.get("type") == "redacted_thinking" for b in blocks)
 
     def test_cache_control_stripped_from_thinking_blocks(self):
@@ -1290,8 +1289,8 @@ class TestThinkingBlockSignatureManagement:
 
 
 
-    def test_multi_turn_conversation_preserves_only_last(self):
-        """Full multi-turn conversation: only last assistant keeps thinking."""
+    def test_multi_turn_conversation_preserves_all_thinking(self):
+        """Every intact assistant turn keeps its thinking block."""
         messages = [
             {"role": "user", "content": "Question 1"},
             {
@@ -1323,21 +1322,11 @@ class TestThinkingBlockSignatureManagement:
         assistants = [m for m in result if m["role"] == "assistant"]
         assert len(assistants) == 3
 
-        # First two: no thinking blocks
-        for a in assistants[:2]:
-            assert not any(
-                b.get("type") in {"thinking", "redacted_thinking"}
-                for b in a["content"]
-                if isinstance(b, dict)
-            )
-
-        # Last one: thinking preserved
-        last_thinking = [
-            b for b in assistants[2]["content"]
+        thinking = [
+            b for assistant in assistants for b in assistant["content"]
             if isinstance(b, dict) and b.get("type") == "thinking"
         ]
-        assert len(last_thinking) == 1
-        assert last_thinking[0]["signature"] == "sig_3"
+        assert [b["signature"] for b in thinking] == ["sig_1", "sig_2", "sig_3"]
 
 
 

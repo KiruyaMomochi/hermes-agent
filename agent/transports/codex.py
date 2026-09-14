@@ -351,91 +351,6 @@ def _profile_declared_efforts(provider: Any, model: Optional[str], base_url: Any
     return None if declared is None else tuple(declared)
 
 
-def _is_azure_foundry_responses(params: dict[str, Any]) -> bool:
-    """True for Microsoft Foundry's Responses API (provider id, else host match — not substring)."""
-    from utils import base_url_host_matches
-
-    if str(params.get("provider") or "").strip().lower() == "azure-foundry":
-        return True
-    return base_url_host_matches(str(params.get("base_url") or ""), "services.ai.azure.com")
-
-
-def _is_post_tool_replay(messages: Optional[list[dict[str, Any]]]) -> bool:
-    """True when ``messages`` end on a tool-result run issued by the preceding assistant turn.
-
-    Azure Foundry rejects only this post-tool shape when encrypted reasoning is
-    replayed, so only the *trailing* messages are checked (a whole-history scan
-    would make suppression sticky). Call ids resolve like ``_chat_messages_to_responses_input``.
-    """
-    from agent.codex_responses_adapter import _canonical_call_id_from_fc, _split_responses_tool_id
-
-    def _pair_ids(raw: Any, explicit: Any = None) -> set:
-        embedded_call_id, item_id = _split_responses_tool_id(raw)
-        ids = {embedded_call_id} if embedded_call_id else set()
-        if isinstance(explicit, str) and explicit.strip():
-            ids.add(explicit.strip())
-        if not ids and isinstance(raw, str) and raw.strip():
-            ids.add(raw.strip())
-        canonical = _canonical_call_id_from_fc(item_id)
-        if canonical:
-            ids.add(canonical)
-        return ids
-
-    trailing = set()
-    for msg in reversed(messages or ()):
-        role = msg.get("role") if isinstance(msg, dict) else None
-        if role == "system":
-            continue
-        if role == "tool":
-            ids = _pair_ids(msg.get("tool_call_id"))
-            if not ids:
-                return False
-            trailing |= ids
-            continue
-        # First non-tool message must be the assistant turn that issued the run.
-        if role != "assistant":
-            return False
-        return any(
-            trailing & _pair_ids(call.get("id"), call.get("call_id"))
-            for call in msg.get("tool_calls") or []
-            if isinstance(call, dict)
-        )
-    return False
-
-
-def _is_azure_responses(params: dict[str, Any]) -> bool:
-    """True for any Azure-hosted Responses endpoint: the ``azure-foundry`` provider, a resource-level
-    ``*.openai.azure.com`` host, or the project-scoped ``*.services.ai.azure.com`` gateway."""
-    from utils import base_url_host_matches
-
-    if str(params.get("provider") or "").strip().lower() == "azure-foundry":
-        return True
-    base_url = str(params.get("base_url") or "")
-    return base_url_host_matches(base_url, "openai.azure.com") or base_url_host_matches(base_url, "services.ai.azure.com")
-
-
-def _newest_reasoning_only(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Copy of ``messages`` keeping ``codex_reasoning_items`` only on the newest assistant row that has any.
-    Foundry rejects a request that replays encrypted reasoning from more than one prior response (HTTP 400
-    "Conflicting authenticated continuation identities", #105369). ``compaction`` checkpoints stay everywhere."""
-    out: list[dict[str, Any]] = []
-    newest_kept = False
-    for msg in reversed(messages):
-        items = msg.get("codex_reasoning_items") if isinstance(msg, dict) and msg.get("role") == "assistant" else None
-        if isinstance(items, list) and any(isinstance(i, dict) and i.get("type") != "compaction" for i in items):
-            if newest_kept:
-                checkpoints = [i for i in items if isinstance(i, dict) and i.get("type") == "compaction"]
-                msg = dict(msg)
-                if checkpoints:
-                    msg["codex_reasoning_items"] = checkpoints
-                else:
-                    msg.pop("codex_reasoning_items")
-            newest_kept = True
-        out.append(msg)
-    out.reverse()
-    return out
-
-
 def _native_compaction_active(context_management: Any) -> bool:
     """True only when the caller's eligibility gate produced a non-empty payload.
 
@@ -563,14 +478,7 @@ class ResponsesApiTransport(ProviderTransport):
         is_github_responses = params.get("is_github_responses") is True
         is_codex_backend = params.get("is_codex_backend") is True
         is_xai_responses = params.get("is_xai_responses") is True
-        # Foundry 400s on encrypted-reasoning replay only in the post-tool follow-up turn.
-        replay_encrypted_reasoning = bool(params.get("replay_encrypted_reasoning", True)) and not (
-            _is_azure_foundry_responses(params) and _is_post_tool_replay(payload_messages)
-        )
-        # Own predicate: #101243 may narrow _is_azure_foundry_responses to the project gateway, and the
-        # multi-item rejection happens on resource-level hosts too.
-        if replay_encrypted_reasoning and _is_azure_responses(params):
-            payload_messages = _newest_reasoning_only(payload_messages)
+        replay_encrypted_reasoning = bool(params.get("replay_encrypted_reasoning", True))
         # One predicate decides whether context_management goes out AND whether the converter may replay a checkpoint.
         context_management = params.get("context_management")
         native_compaction_active = _native_compaction_active(context_management)

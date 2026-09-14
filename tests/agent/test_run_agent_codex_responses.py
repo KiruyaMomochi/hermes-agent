@@ -374,26 +374,17 @@ def _azure_post_tool_messages():
     ]
 
 
-def test_build_api_kwargs_azure_foundry_post_tool_suppresses_reasoning(monkeypatch):
-    """Live agent path reaches Azure Foundry detection and scopes suppression.
-
-    Exercises ``chat_completion_helpers.build_api_kwargs`` end-to-end rather
-    than the transport in isolation: the agent must forward ``provider`` and
-    ``base_url`` into ``build_kwargs`` for the Foundry detection to fire at
-    all. On the post-tool follow-up shape the encrypted reasoning item is
-    dropped while function_call / function_call_output continuity is kept.
-    """
+def test_build_api_kwargs_azure_foundry_post_tool_replays_reasoning(monkeypatch):
+    """The live agent path keeps encrypted reasoning alongside tool continuity."""
     agent = _build_azure_foundry_agent(monkeypatch)
     assert agent._codex_reasoning_replay_enabled is True
 
     kwargs = agent._build_api_kwargs(_azure_post_tool_messages())
-
     item_types = [item.get("type") for item in kwargs["input"] if isinstance(item, dict)]
-    assert "reasoning" not in item_types
+    assert "reasoning" in item_types
     assert "function_call" in item_types
     assert "function_call_output" in item_types
-    assert kwargs.get("include") == []
-
+    assert kwargs.get("include") == ["reasoning.encrypted_content"]
 
 def test_build_api_kwargs_azure_foundry_non_tool_preserves_reasoning(monkeypatch):
     """Ordinary (non-tool) Azure Foundry continuity is unchanged via the live path.
@@ -422,44 +413,6 @@ def test_build_api_kwargs_azure_foundry_non_tool_preserves_reasoning(monkeypatch
     assert "function_call" not in item_types
     assert "function_call_output" not in item_types
     assert kwargs.get("include") == ["reasoning.encrypted_content"]
-
-
-def test_build_api_kwargs_azure_foundry_user_turn_after_tool_call_keeps_reasoning(
-    monkeypatch,
-):
-    """Suppression does not stick once the tool call is answered.
-
-    Regression guard for the sticky-history shape: after the assistant has
-    replied to the tool result, a plain user follow-up is a payload Foundry
-    accepts, so reasoning replay must come back on rather than stay off for
-    the remainder of the conversation.
-    """
-    agent = _build_azure_foundry_agent(monkeypatch)
-
-    messages = _azure_post_tool_messages() + [
-        {
-            "role": "assistant",
-            "content": "Marker created.",
-            "codex_reasoning_items": [_azure_reasoning_item()],
-        },
-        {"role": "user", "content": "Now explain recursion"},
-    ]
-
-    kwargs = agent._build_api_kwargs(messages)
-
-    item_types = [item.get("type") for item in kwargs["input"] if isinstance(item, dict)]
-    assert "reasoning" in item_types
-    assert "function_call" in item_types
-    assert "function_call_output" in item_types
-    assert kwargs.get("include") == ["reasoning.encrypted_content"]
-
-
-
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
