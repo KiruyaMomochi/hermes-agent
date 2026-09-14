@@ -780,8 +780,12 @@ function toolImageUrl(args: Record<string, unknown>, result: Record<string, unkn
   const content = result.content
   const contentImage = Array.isArray(content)
     ? content.find((part): part is Record<string, unknown> => {
-        if (!isRecord(part)) return false
-        if (part.type !== 'image_url') return false
+        if (!isRecord(part)) {
+          return false
+        }
+        if (part.type !== 'image_url') {
+          return false
+        }
         const imageUrl = part.image_url
         return isRecord(imageUrl) && typeof imageUrl.url === 'string'
       })
