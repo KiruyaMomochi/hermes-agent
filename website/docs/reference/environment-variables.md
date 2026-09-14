@@ -330,7 +330,7 @@ These are set automatically by the Docker terminal backend when `proxy.enabled: 
 | `TELEGRAM_MENTION_PATTERNS` | JSON array, newline-separated list, or comma-separated list of regex wake-word patterns accepted when Telegram group mention gating is enabled. Equivalent to `telegram.mention_patterns`. |
 | `TELEGRAM_EXCLUSIVE_BOT_MENTIONS` | When enabled, explicit `@...bot` mentions in Telegram groups route only to the mentioned bot usernames before reply or wake-word fallbacks run. Default: `true`. Equivalent to `telegram.exclusive_bot_mentions`. |
 | `TELEGRAM_BOTS_REQUIRE_MENTION` | When enabled, a message sent by another bot must explicitly `@thisbot` to trigger a response — a quote-reply alone is ignored, which stops two bots from replying to each other forever. Human replies are unaffected. Default: `false`. Equivalent to `telegram.bots_require_mention`. |
-| `TELEGRAM_REPLY_TO_MODE` | Reply-reference behavior: `off`, `first` (default), or `all`. Matches the Discord pattern. |
+| `TELEGRAM_REPLY_TO_MODE` | Reply-reference behavior: `off` or `first` (default). |
 | `TELEGRAM_IGNORED_THREADS` | Comma-separated Telegram forum topic/thread IDs where the bot never responds |
 | `TELEGRAM_ALLOWED_TOPICS` | Comma-separated Telegram forum topic/thread IDs the bot handles. When set, messages from any other group/forum topic are ignored (the first drop per chat/topic is logged at INFO). DMs are never filtered. Telegram's General topic is normalized to ID `1`. Applied before `TELEGRAM_IGNORED_THREADS`. Equivalent to `telegram.allowed_topics` in `config.yaml`. |
 | `TELEGRAM_FREE_RESPONSE_CHATS` | Comma-separated chat IDs where `require_mention` is bypassed and Hermes responds to every group message. Equivalent to `telegram.free_response_chats`. |

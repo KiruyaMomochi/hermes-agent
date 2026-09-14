@@ -17,7 +17,7 @@ from tests.gateway.test_run_progress_topics import ProgressCaptureAdapter, _make
 
 
 async def _deliver(monkeypatch, *, show_reasoning: bool, already_sent: bool, is_bot: bool = False,
-                   platform: Platform = Platform.TELEGRAM):
+                   platform: Platform = Platform.DISCORD):
     import gateway.run as gateway_run
 
     monkeypatch.setattr(gateway_run, "_load_gateway_config",
@@ -142,7 +142,7 @@ async def test_bot_peer_reasoning_matches_the_non_streamed_path(monkeypatch):
     runner, adapter, returned = await _deliver(monkeypatch, show_reasoning=True, already_sent=False,
                                                is_bot=True)
     assert adapter.sent == []
-    source = SessionSource(platform=Platform.TELEGRAM, chat_id="42", chat_type="dm", is_bot=True)
+    source = SessionSource(platform=Platform.DISCORD, chat_id="42", chat_type="dm", is_bot=True)
     expected = runner._hmwa_prepend_reasoning(
         {"last_reasoning": "thinking hard about it"}, "the answer is 42", source, False)
     assert returned == expected

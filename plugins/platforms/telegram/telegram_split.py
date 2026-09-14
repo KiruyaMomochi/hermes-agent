@@ -28,6 +28,20 @@ def split_reply_anchor(adapter: Any, chat_id: str, reply_to: Optional[str],
 
 
 def reply_message_count(adapter: Any, content: str, metadata: Optional[dict[str, Any]]) -> int:
+    """Count delimiter bubbles as well as each bubble's platform overflow."""
+    from plugins.platforms.telegram.telegram_split_replies import split_reply_delimited
+    if getattr(adapter, "_split_replies_enabled", False) and not (metadata or {}).get("expect_edits"):
+        parts = split_reply_delimited(content, max_parts=getattr(adapter, "_split_replies_max_parts", 8))
+        if len(parts) > 1:
+            # Reserve legacy capacity too: a later rich refusal can re-chunk a bubble after
+            # preceding bubbles have landed. The whole reply, not a fragment, owns the file.
+            legacy = {**(metadata or {}), "expect_edits": True}
+            return sum(max(_single_message_count(adapter, part, metadata), _single_message_count(adapter, part, legacy))
+                       for part, _ in parts)
+    return _single_message_count(adapter, content, metadata)
+
+
+def _single_message_count(adapter: Any, content: str, metadata: Optional[dict[str, Any]]) -> int:
     """Messages ``send(content)`` would post: its rich parts when it goes out rich, else its
     MarkdownV2 chunks (escaping can push a raw-sized text past 4,096 UTF-16 units)."""
     from gateway.platforms.base import utf16_len

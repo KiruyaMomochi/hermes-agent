@@ -53,8 +53,9 @@ async def edit_overflow_split(
     prev_id = message_id
     thread_id = adapter._metadata_thread_id(metadata)
     for chunk in chunks[1:]:
-        reply_to_id = int(prev_id) if prev_id else None
-        thread_kwargs = adapter._thread_kwargs_for_send(chat_id, thread_id, metadata, reply_to_message_id=reply_to_id)
+        reply_to_id = int(prev_id) if prev_id and adapter._reply_to_mode != "off" else None
+        thread_kwargs = adapter._thread_kwargs_for_send(
+            chat_id, thread_id, metadata, reply_to_message_id=reply_to_id, reply_to_mode=adapter._reply_to_mode)
         sent_msg = await adapter._send_overflow_continuation(chat_id, chunk, reply_to_id, thread_kwargs, thread_id, metadata, finalize)
         flood = sent_msg if isinstance(sent_msg, SendResult) else None  # flood-refused: the caller holds off
         if sent_msg is None or flood:

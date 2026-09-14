@@ -28,6 +28,29 @@ class StreamTransportMixin:
 
     _MIN_NEW_MSG_CHARS = 4
 
+    async def _send_uninterrupted(self, *args, **kwargs):
+        """``adapter.send`` that a cancel cannot cut in half.
+
+        One send may fan out into paced bubbles (Telegram ``---`` split) and outlive the
+        gateway's flush wait. Cancelling mid-fanout loses the receipt for bubbles already on
+        screen, and the gateway resends the whole reply. So the send runs to completion, the
+        cancel is parked on ``_cancel_deferred``, and ``run()`` re-raises it at the next tick."""
+        return await self._await_uninterrupted(self.adapter.send(*args, **kwargs))
+
+    async def _await_uninterrupted(self, operation):
+        """Keep the receipt from a multi-message send or resume before honoring cancellation."""
+        send = asyncio.ensure_future(operation)
+        while True:
+            try:
+                return await asyncio.shield(send)
+            except asyncio.CancelledError:
+                if send.cancelled():
+                    raise
+                self._cancel_deferred = True
+                task = asyncio.current_task()
+                if task is not None:
+                    task.uncancel()
+
     async def _edit_message(self, *, message_id: str, content: str, finalize: bool = False):
         """Edit via the adapter, passing routing metadata when supported."""
         # Contract: adapters must accept finalize= even when False (test-guarded).
@@ -308,7 +331,7 @@ class StreamTransportMixin:
             return False
         stale_ids = self._stale_preview_ids()
         try:
-            result = await self.adapter.send(
+            result = await self._send_uninterrupted(
                 chat_id=self.chat_id, content=text, metadata=self._metadata_for_send(final=True))
         except Exception as e:
             logger.debug("Fresh-final send failed, falling back to edit: %s", e)
@@ -317,6 +340,8 @@ class StreamTransportMixin:
             result = e  # a raised timeout may have landed too: same handling as a returned one
         if not getattr(result, "success", False):
             if not await self._uncertain_send_fully_shown(result):
+                if self._handle_partial_overflow(result, text):
+                    return True
                 return False
             # The fresh final may be on screen with no id: editing the preview up to the same
             # text would show the answer twice. Keep the preview (no id to clean up against).
@@ -505,7 +530,7 @@ class StreamTransportMixin:
             )
             return False
         try:
-            result = await self.adapter.send(
+            result = await self._send_uninterrupted(
                 chat_id=self.chat_id, content=text, reply_to=self._initial_reply_to_id,
                 metadata=self._metadata_for_send(final=finalize, expect_edits=not finalize))
         except Exception as exc:
@@ -517,6 +542,8 @@ class StreamTransportMixin:
         if not result.success:
             if await self._uncertain_send_fully_shown(result):
                 return self._hold_ambiguous_first_send(text, raw_text, finalize=finalize)
+            if self._handle_partial_overflow(result, text):
+                return False
             self._edit_supported = False
             return False
         self._already_sent = True
@@ -534,6 +561,13 @@ class StreamTransportMixin:
 
     async def _edit_existing(self, text: str, *, finalize: bool, is_turn_final: bool) -> bool:
         """Edit the live preview (or replace it via fresh-final when finalizing)."""
+        deleted = getattr(self.adapter, "message_is_deleted", None)
+        if callable(deleted) and deleted(self.chat_id, self._message_id) is True:
+            # A deliberate recall is not an edit failure: neither reconciliation nor
+            # rich fresh-final replacement may publish that bubble again.
+            self._last_sent_text = text
+            return True
+
         # REQUIRES_EDIT_FINALIZE adapters need the finalize=True edit even when
         # unchanged; everyone else short-circuits.
         if text == self._last_sent_text and not (finalize and self._adapter_requires_finalize):
@@ -612,6 +646,32 @@ class StreamTransportMixin:
         self._edit_supported = False
         self._already_sent = True
 
+    def _handle_partial_overflow(self, result, text: str) -> bool:
+        """Check SendResult for partial_overflow; enter fallback mode if present. True when handled."""
+        raw_response = getattr(result, "raw_response", None)
+        if not isinstance(raw_response, dict) or not raw_response.get("partial_overflow"):
+            return False
+        if raw_response.get("delimited_resume"):
+            self._pending_delimited_send = (result, text)
+        # Some overflow chunks landed but not the whole response: preserve the
+        # visible prefix so got_done sends the missing tail.
+        self._message_id = str(raw_response.get("last_message_id") or result.message_id
+                               or self._message_id)
+        delivered_prefix = raw_response.get("delivered_prefix")
+        # Preserve upstream's ambiguous-prefix handling when the edit/send shared helper moves.
+        if raw_response.get("delivery_uncertain"):
+            self._delivery_uncertain = self._preview_uncertain = True
+        if isinstance(delivered_prefix, str) and delivered_prefix:
+            self._last_sent_text = delivered_prefix
+            self._fallback_preserve_partial_messages = text.startswith(delivered_prefix)
+            self._enter_fallback_mode(delivered_prefix)
+        else:
+            self._fallback_preserve_partial_messages = False
+            self._enter_fallback_mode(self._visible_prefix())
+        if getattr(result, "continuation_message_ids", ()):
+            self._notify_new_message()
+        return True
+
     async def _on_edit_failure(self, result, text: str, *, finalize: bool, is_turn_final: bool,
                                ) -> bool:
         """Classify a failed edit: partial overflow, flood backoff, or fallback mode.  Always
@@ -644,26 +704,7 @@ class StreamTransportMixin:
         # content IS this finalize payload (#71643). Record it on split turns too: post-#78541 an unrecorded
         # split reads as a mismatch and would re-send this already-visible answer, reintroducing the
         # duplicate #45517 fixed (#36965 / #25349).
-        raw_response = getattr(result, "raw_response", None)
-        if isinstance(raw_response, dict) and raw_response.get("partial_overflow"):
-            # Some overflow chunks landed but not the whole response: preserve the
-            # visible prefix so got_done sends the missing tail.
-            self._message_id = str(raw_response.get("last_message_id") or result.message_id
-                                   or self._message_id)
-            delivered_prefix = raw_response.get("delivered_prefix")
-            # A prefix that counts a timed-out part as shown is a guess: the ledger owns redelivery,
-            # and when that part was the last one nothing is resent (``_fallback_when_nothing_unseen``).
-            if raw_response.get("delivery_uncertain"):
-                self._delivery_uncertain = self._preview_uncertain = True
-            if isinstance(delivered_prefix, str) and delivered_prefix:
-                self._last_sent_text = delivered_prefix
-                self._fallback_preserve_partial_messages = text.startswith(delivered_prefix)
-                self._enter_fallback_mode(delivered_prefix)
-            else:
-                self._fallback_preserve_partial_messages = False
-                self._enter_fallback_mode(self._visible_prefix())
-            if getattr(result, "continuation_message_ids", ()):
-                self._notify_new_message()
+        if self._handle_partial_overflow(result, text):
             return False
 
         # Flood control: adaptive backoff (double the interval, or the server's own

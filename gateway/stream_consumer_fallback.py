@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import fields
 import logging
 from typing import Any, Callable, Optional
 
-from gateway.platforms.base import BasePlatformAdapter as _BasePlatformAdapter
+from gateway.platforms.base import BasePlatformAdapter as _BasePlatformAdapter, SendResult
 from gateway.platforms.helpers import reply_file_off
 from gateway.stream_consumer_fences import ensure_closed_code_fences, open_code_fence_span
 
@@ -31,7 +32,7 @@ class StreamFallbackMixin:
         if not text.strip():
             return reply_to_id
         try:
-            result = await self.adapter.send(
+            result = await self._send_uninterrupted(
                 chat_id=self.chat_id, content=text, reply_to=reply_to_id,
                 metadata=self._metadata_for_send(final=final, expect_edits=not final))
         except Exception as e:
@@ -203,6 +204,27 @@ class StreamFallbackMixin:
             return self._split_text_chunks(text, limit, len_fn)
         return list(chunks)
 
+    async def _resume_delimited_fallback(self, text: str) -> bool:
+        """Resume the inner transport receipt before considering a raw-text continuation."""
+        pending = self._pending_delimited_send
+        if pending is None or pending[1] != self._clean_for_display(text):
+            return False
+        self._pending_delimited_send = None
+        result = await self._await_uninterrupted(self.adapter._resume_partial_send(
+            self.chat_id, pending[0], reply_to=None, metadata=self._metadata_for_send(final=True)))
+        if result is not None and (result.success or await self._uncertain_send_fully_shown(result)):
+            self._track_preview_ids_from_result(result)
+            self._already_sent = True
+            self._fallback_prefix = ""
+            self._mark_final_delivered(record=text)
+            return True
+        if result is not None:
+            self._handle_partial_overflow(result, text)
+        self._pending_delimited_send = (result or pending[0], text)
+        # Exhausted the inline attempt. Keep the receipt authoritative: the gateway
+        # ledgers the incomplete final for marked redelivery instead of a blind duplicate.
+        return True
+
     async def _send_fallback_final(self, text: str) -> None:
         """Send the final continuation after streaming edits stop working (one flood retry
         per chunk)."""
@@ -215,6 +237,10 @@ class StreamFallbackMixin:
                 "suppressing the fallback continuation: the connector already "
                 "declined this destination for this run"
             )
+            return
+        if self._turn_reset():
+            return  # never start a tail for a turn /stop or /new already retired
+        if await self._resume_delimited_fallback(text):
             return
         if self._turn_reset():
             return  # the refused final edit before this was awaited; /stop or /new may have landed
@@ -383,20 +409,28 @@ class StreamFallbackMixin:
         cap and reports the messages after the timed-out one as ``unattempted_chunks``: only those
         are sent now (the one in flight may already show); when they cannot be, the send is NOT
         fully shown and the caller treats it as undelivered (a repeated head beats a lost tail)."""
-        shown = False
+        original, shown = result, False
         while self._send_failure_may_have_delivered(result):
             raw = getattr(result, "raw_response", None)
-            if not (isinstance(raw, dict) and raw.get("unattempted_chunks")):
+            state = raw.get("delimited_resume") if isinstance(raw, dict) else None
+            if state and not (state["inner"].get("raw_response") or {}).get("delivery_uncertain"):
+                break  # an earlier bubble was ambiguous, but this tail is definitely still missing
+            if not (isinstance(raw, dict) and (raw.get("unattempted_chunks") or raw.get("unattempted_delimited_parts"))):
                 shown = True
                 break
-            result = await self.adapter._resume_partial_send(
-                self.chat_id, result, reply_to=None, metadata=self._metadata_for_send(final=True))
+            result = await self._await_uninterrupted(self.adapter._resume_partial_send(
+                self.chat_id, result, reply_to=None, metadata=self._metadata_for_send(final=True)))
             if result is None or getattr(result, "success", False):
                 shown = result is not None
                 break
         # Counted as shown on a guess: the gateway leaves the answer to the delivery ledger's marked
         # redelivery, so a send that never landed is not silence (``delivery_uncertain``).
         self._delivery_uncertain = self._delivery_uncertain or shown
+        if not shown and isinstance(original, SendResult) and isinstance(result, SendResult) and original is not result:
+            # A resumed tail may itself make progress before failing. Its caller still owns
+            # ``original``: publish the latest receipt there, never re-arm a stale tail.
+            for field in fields(SendResult):
+                setattr(original, field.name, getattr(result, field.name))
         return shown
 
     async def _send_with_flood_retry(self, *, content: str, retry_log: str, reply_to=None):
@@ -408,7 +442,7 @@ class StreamFallbackMixin:
             kwargs["reply_to"] = reply_to
         result = None
         for attempt in range(2):
-            result = await self.adapter.send(**kwargs)
+            result = await self._send_uninterrupted(**kwargs)
             if getattr(result, "success", False):
                 break
             retry_delay = self._fallback_flood_retry_delay(result)
@@ -510,7 +544,7 @@ class StreamFallbackMixin:
             # Interim: must never seal a native stream (see _send_commentary).
             _md = dict(self.metadata) if self.metadata else {}
             _md["_interim_send"] = True
-            result = await self.adapter.send(chat_id=self.chat_id, content=tail, metadata=_md)
+            result = await self._send_uninterrupted(chat_id=self.chat_id, content=tail, metadata=_md)
             if result.success:
                 self._already_sent = True
         except Exception as e:
@@ -549,7 +583,7 @@ class StreamFallbackMixin:
             _platform_name = str(_plat or getattr(self.adapter, "name", "")).lower()
             _needs_reply_anchor = _platform_name in ("buzz", "slack", "mattermost", "feishu")
             with reply_file_off(False):  # a complete message: past the cap it goes out as one file (#152012)
-                result = await self.adapter.send(
+                result = await self._send_uninterrupted(
                     chat_id=self.chat_id, content=text,
                     reply_to=self._initial_reply_to_id if _needs_reply_anchor else None, metadata=_md)
             # Do NOT set _already_sent: commentary is interim, and the flag would
