@@ -34,6 +34,10 @@ class TestReplyToModeConfig:
         adapter = adapter_factory(reply_to_mode="off")
         assert adapter._reply_to_mode == "off"
 
+    def test_all_mode(self, adapter_factory):
+        adapter = adapter_factory(reply_to_mode="all")
+        assert adapter._reply_to_mode == "all"
+
 
 class TestShouldThreadReply:
     """Tests for _should_thread_reply method."""
@@ -48,6 +52,12 @@ class TestShouldThreadReply:
         assert adapter._should_thread_reply("msg-123", 0) is False
         assert adapter._should_thread_reply("msg-123", 1) is False
         assert adapter._should_thread_reply("msg-123", 5) is False
+
+    def test_all_mode_threads_every_chunk(self, adapter_factory):
+        adapter = adapter_factory(reply_to_mode="all")
+        assert adapter._should_thread_reply("msg-123", 0) is True
+        assert adapter._should_thread_reply("msg-123", 1) is True
+        assert adapter._should_thread_reply("msg-123", 5) is True
 
 
 class TestSendWithReplyToMode:
@@ -111,7 +121,6 @@ class TestEnvVarOverride:
             _apply_env_overrides(config)
         assert config.platforms[Platform.TELEGRAM].reply_to_mode == "all"
 
-
 class TestTelegramYamlConfigLoading:
     """Tests for reply_to_mode loaded from config.yaml telegram section."""
 
@@ -147,6 +156,28 @@ class TestTelegramYamlConfigLoading:
         load_gateway_config()
 
         assert os.environ.get("TELEGRAM_REPLY_TO_MODE") == "all"
+
+    def test_multiplexed_runner_keeps_reply_mode_in_platform_extra(self, tmp_path, monkeypatch):
+        """The scoped startup reload must not depend on a process-global env bridge."""
+        from agent import secret_scope
+        from gateway import run as run_mod
+
+        hermes_home = self._write_config(
+            tmp_path,
+            "gateway:\n  multiplex_profiles: true\n"
+            "telegram:\n  enabled: true\n  token: test-token\n  reply_to_mode: \"off\"\n",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("TELEGRAM_REPLY_TO_MODE", raising=False)
+        secret_scope.set_multiplex_active(False)
+        try:
+            config = run_mod.load_gateway_config_for_runner()
+        finally:
+            secret_scope.set_multiplex_active(False)
+
+        telegram = config.platforms[Platform.TELEGRAM]
+        assert telegram.reply_to_mode == "off"
+        assert telegram.extra["reply_to_mode"] == "off"
 
 
 class TestSyntheticReplyAnchor:
@@ -209,12 +240,12 @@ class TestDMTopicFallbackReplyToMode:
         assert result is None
 
 
-    def test_explicit_reply_to_overrides_mode(self):
-        """Explicit reply_to param always wins, regardless of mode."""
+    def test_explicit_reply_to_does_not_override_off(self):
+        """Media and other explicit reply_to callers must respect the visual opt-out."""
         result = TelegramAdapter._reply_to_message_id_for_send(
             "999", self.DM_TOPIC_METADATA, reply_to_mode="off",
         )
-        assert result == 999
+        assert result is None
 
     # -- _thread_kwargs_for_send classmethod --
 
@@ -241,6 +272,7 @@ class TestDMTopicFallbackReplyToMode:
 
         call = adapter._bot.send_message.call_args_list[0]
         assert call.kwargs.get("reply_to_message_id") is None
+        assert call.kwargs.get("message_thread_id") == 42
 
 
 class TestDMTopicSyntheticSendRouting:
