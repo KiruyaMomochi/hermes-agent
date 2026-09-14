@@ -261,6 +261,12 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             )
             if _intentional_silence:
                 self._hmwa_pause_typing_after_silence(event, source)
+            if source.platform == Platform.TELEGRAM and response and not _intentional_silence:
+                await self._hmwa_deliver_telegram_reasoning(
+                    agent_result.get("last_reasoning"), source,
+                    self._event_thread_metadata(event, source),
+                )
+
             response = self._usage_window_chat_wording(agent_result, self._hmwa_prepend_reasoning(agent_result, response, source, _intentional_silence))
             _footer_line = self._hmwa_runtime_footer_line(agent_result, source, _turn_seconds)
             from gateway.runtime_footer import FooteredReply  # streamed: the footer goes out as a trailing send instead
@@ -1585,9 +1591,14 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         # Delivery uses the finalized task result (empty/failure normalization), not raw ``result``.
         _delivery_result = response if isinstance(response, dict) else (result or {})
         first_response = _delivery_result.get("final_response", "")
+        canonical_first_response = _delivery_result.get("_streamed_delivery_response")
+        if canonical_first_response is None:
+            canonical_first_response = _delivery_result.get("_canonical_final_response", first_response)
         _already_streamed = self._run_agent_stream_confirmed_final_delivery(
-            _sc, first_response, previewed=bool(_delivery_result.get("response_previewed")),
+            _sc, canonical_first_response, previewed=bool(_delivery_result.get("response_previewed")),
         )
+        pending_delivery = getattr(_sc, "has_pending_final_delivery", None)
+        _already_streamed = _already_streamed or (callable(pending_delivery) and pending_delivery(canonical_first_response) is True)
         # Same silence predicate as the normal path, else this branch leaks the literal marker.
         _silent = False
         if self._is_intentional_silence(_delivery_result, first_response):
@@ -1871,7 +1882,11 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         _sc, source, session_key = turn_ctx.stream_consumer_holder[0], turn_ctx.source, turn_ctx.session_key
         if not isinstance(response, dict) or response.get("failed") or finite_turn_required() is True:
             return
-        _final = response.get("final_response") or ""
+        _final = response.get("_streamed_delivery_response")
+        if _final is None:
+            _final = response.get("_canonical_final_response")
+        if _final is None:
+            _final = response.get("final_response") or ""
         _is_empty_sentinel = not _final or _final == "(empty)"
         # response_previewed: only suppress if that EXACT text was delivered, not unrelated commentary.
         # Unrelated commentary/progress must not be mistaken for the final response (#14238).
@@ -1900,7 +1915,13 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         if _is_empty_sentinel:
             return
         _sk = session_key or "?"
-        if not _transformed and (_streamed or _content_delivered):
+        pending_delivery = getattr(_sc, "has_pending_final_delivery", None)
+        if not _transformed and callable(pending_delivery) and pending_delivery(_final) is True:
+            # Some bubbles landed, and the bounded tail resume failed or was cancelled.
+            # This is NOT confirmed delivery: the normal completion seam saves the whole
+            # reply as a marked ledger obligation instead of posting an unmarked duplicate.
+            response["already_sent"], response["delivery_uncertain"] = True, True
+        elif not _transformed and (_streamed or _content_delivered):
             logger.info("Suppressing normal final send for session %s: final delivery already confirmed (streamed=%s previewed=%s content_delivered=%s).", _sk, _streamed, _previewed, _content_delivered)
             # A stream send counted as shown on a timeout may be lost: the ledger resends it marked.
             response["already_sent"], response["delivery_uncertain"] = True, getattr(_sc, "delivery_uncertain", False) is True

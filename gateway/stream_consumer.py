@@ -138,6 +138,8 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         self._turn_id = str(uuid.uuid4())  # keys send_stream_frame() per concurrent consumer
         # Returns False after /new or /stop; run() then abandons the stream.
         self._run_still_current = run_still_current or (lambda: True)
+        # A cancel that landed mid-send; run() honours it once the send returns.
+        self._cancel_deferred = False
         # Whether this consumer is fed the final reply's stream deltas. A consumer built only to
         # relay interim commentary (text streaming off, ``display.interim_assistant_messages`` on)
         # never receives the final's deltas, so the duplicate-risk diagnostic in
@@ -210,6 +212,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         self._last_sent_text = ""    # skip redundant edits
         self._fallback_final_send = False
         self._fallback_prefix = ""
+        self._pending_delimited_send = None
         # Fallback sends only the missing tail after a partial overflow delivery.
         self._fallback_preserve_partial_messages = False
         self._segment_preview_message_ids: set[str] = set()
@@ -289,7 +292,12 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
     final_response_sent = property(lambda self: self._final_response_sent)
     message_id = property(lambda self: self._message_id)
     final_content_delivered = property(lambda self: self._final_content_delivered)
-    delivery_uncertain = property(lambda self: self._delivery_uncertain)
+    delivery_uncertain = property(lambda self: self._delivery_uncertain or self._pending_delimited_send is not None)
+
+    def has_pending_final_delivery(self, text: str) -> bool:
+        """A partially delivered delimiter plan is not success, nor safe to send whole again."""
+        pending = self._pending_delimited_send
+        return pending is not None and self._display_payload(pending[1]) == self._display_payload(text)
 
     async def _notify_before_finalize(self) -> None:
         """Run the pre-finalize hook exactly once, swallowing hook errors."""
@@ -548,7 +556,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                        "falling back to send() for pre-prompt text (chat=%s)",
                        _reason, self.chat_id)
         try:
-            if getattr(await self.adapter.send(self.chat_id, finalize_text), "success", False):
+            if getattr(await self._send_uninterrupted(self.chat_id, finalize_text), "success", False):
                 return True
         except Exception as send_err:
             logger.warning("%s boundary: fallback send also failed: %s", _reason, send_err)
@@ -654,6 +662,8 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                 if tick.got_done:
                     await self._finalize_turn(tick)
                     return
+                if self._cancel_deferred:
+                    raise asyncio.CancelledError
 
                 if tick.commentary_text is not None:
                     await self._deliver_commentary(tick.commentary_text)

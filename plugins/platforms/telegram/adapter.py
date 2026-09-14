@@ -485,6 +485,24 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         self._mention_patterns = self._compile_mention_patterns()
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
         self._disable_link_previews: bool = self._coerce_bool_extra("disable_link_previews", False)
+        split_cfg = extra.get("split_replies", {})
+        if not isinstance(split_cfg, dict):
+            split_cfg = {"enabled": split_cfg}
+        split_enabled = split_cfg.get("enabled", False)
+        self._split_replies_enabled = (
+            split_enabled if isinstance(split_enabled, bool)
+            else str(split_enabled).strip().lower() in {"1", "true", "yes", "on"}
+        )
+        try:
+            split_delay_ms = float(split_cfg.get("delay_between_ms", 350))
+        except (TypeError, ValueError):
+            split_delay_ms = 350.0
+        self._split_replies_delay_seconds = max(0.0, min(split_delay_ms, 5000.0)) / 1000.0
+        try:
+            split_max_parts = int(split_cfg.get("max_parts", 8))
+        except (TypeError, ValueError):
+            split_max_parts = 8
+        self._split_replies_max_parts = max(2, min(split_max_parts, 20))
         # Bot API 10.1 Rich Messages render what MarkdownV2 degrades (tables, task lists, <details>, block
         # math). Opt-in: current clients make rich messages hard to copy as plain text. rich_drafts is a
         # separate opt-in (Desktop can leave rich draft frames overlaid): off keeps native draft transport
@@ -493,6 +511,8 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         # CJK stays on legacy MarkdownV2 by default (Desktop/macOS garble, #47653); opt-in for unaffected clients.
         self._allow_cjk_rich_messages: bool = self._coerce_bool_extra("allow_cjk_rich_messages", False)
         self._rich_drafts_enabled, self.DRAFT_STREAM_PREFIX_STABLE = self._coerce_bool_extra("rich_drafts", False), self._coerce_bool_extra("plain_drafts", False)
+        self._disable_cjk_rich_guard: bool = self._coerce_bool_extra("disable_cjk_rich_guard", False)
+        self._trace_sends: bool = self._coerce_bool_extra("trace_sends", False)
         self._rich_send_disabled = self._rich_draft_disabled = False  # latched after a capability failure
         # Transient sendChatAction failures recur on every keep-typing tick; back off per chat.
         self._telegram_typing_cooldown_until: dict[str, float] = {}
@@ -890,6 +910,8 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
     @classmethod
     def _reply_to_message_id_for_send(
         cls, reply_to: Optional[str], metadata: Optional[dict[str, Any]] = None, reply_to_mode: Optional[str] = None) -> Optional[int]:
+        if reply_to_mode == "off":
+            return None
         if (anchor := parse_telegram_message_id(reply_to)) is not None:
             return anchor
         if cls._dm_topic_fallback(metadata) and reply_to_mode != "off":
@@ -945,7 +967,8 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         """Routing kwargs for ``sendMessageDraft`` / ``sendRichMessageDraft`` (integer
         ``message_thread_id`` for DM topics — Telegram rejects the raw string ``thread_id``)."""
         kwargs = self._thread_kwargs_for_send(
-            chat_id, self._metadata_thread_id(metadata), metadata, reply_to_message_id=self._reply_to_message_id_for_send(None, metadata),
+            chat_id, self._metadata_thread_id(metadata), metadata,
+            reply_to_message_id=self._reply_to_message_id_for_send(None, metadata, reply_to_mode=self._reply_to_mode),
             reply_to_mode=getattr(self, "_reply_to_mode", None))
         return {k: v for k, v in kwargs.items() if v is not None}
 
@@ -1129,6 +1152,13 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
             return default
         return bool(value)
 
+    def _trace_send(self, event: str, **details: Any) -> None:
+        """Emit opt-in send-path diagnostics without message text or secrets."""
+        if getattr(self, "_trace_sends", False):
+            rendered = " ".join(f"{key}={value!r}" for key, value in details.items())
+            suffix = f" {rendered}" if rendered else ""
+            logger.warning("[%s] [Telegram trace] %s%s", self.name, event, suffix)
+
     def _link_preview_kwargs(self) -> dict[str, Any]:
         if not getattr(self, "_disable_link_previews", False):
             return {}
@@ -1203,7 +1233,8 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
             content and content.strip()
             and not self._has_telegram_desktop_details_math_crash_shape(content)
             and (
-                getattr(self, "_allow_cjk_rich_messages", False)
+                getattr(self, "_disable_cjk_rich_guard", False)
+                or getattr(self, "_allow_cjk_rich_messages", False)
                 or not self._has_telegram_desktop_cjk_rich_garble_shape(content)
             )
             and (not check_size or self._content_fits_rich_limits(content))
@@ -1233,6 +1264,10 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         formatter permanently turns pipe tables into bullet lists.
         """
         metadata = metadata or {}
+        if getattr(self, "_split_replies_enabled", False):
+            from plugins.platforms.telegram.telegram_split_replies import split_reply_delimited
+            if len(split_reply_delimited(content, max_parts=self._split_replies_max_parts)) > 1:
+                return True  # one editable preview must become the completed delimiter plan
         if not (metadata.get("telegram_dm_topic_reply_fallback") or self._metadata_direct_messages_topic_id(metadata)):
             return False
         return self._rich_eligible(content)
@@ -1289,6 +1324,9 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         else:
             should_thread = self._should_thread_reply(reply_to_source, index)
         reply_to_id = int(reply_to_source) if should_thread and reply_to_source else None
+        self._trace_send(
+            "reply_routing", mode=self._reply_to_mode, chunk=index,
+            dm_topic=private_dm_topic_send, thread=bool(thread_id), anchor=reply_to_id is not None)
         return private_dm_topic_send, dm_topic_reply_to_off, reply_to_id
 
     def _compute_single_send_routing(
@@ -1431,9 +1469,11 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
             "chat_id": normalize_telegram_chat_id(chat_id), "draft_id": int(draft_id), "rich_message": self._rich_message_payload(content)}
         payload.update(self._thread_kwargs_for_draft(chat_id, metadata))
         try:
-            return bool(await _await_with_thread_deadline(
+            result = bool(await _await_with_thread_deadline(
                 self._bot.do_api_request("sendRichMessageDraft", api_kwargs=payload),
                 timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False))
+            self._trace_send("rich_draft_send", success=result)
+            return result
         except Exception as exc:
             if _flood_window.note_flood(self, chat_id, exc):
                 return False
@@ -3373,6 +3413,52 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         # One chat at a time (held only around the API calls, never across the reconnect wait above), so
         # two concurrent split replies to one chat cannot interleave their chunks (#114396).
         async with self._chat_send_lock(chat_id):
+            return await self._send_split_reply_locked(chat_id, content, reply_to, metadata)
+
+    async def _send_split_reply_locked(
+        self, chat_id: str, content: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
+    ) -> SendResult:
+        """Keep delimiter fanout in the same per-chat ordering gate as ordinary chunks."""
+        split_metadata = dict(metadata or {})
+        if getattr(self, "_split_replies_enabled", False) and not split_metadata.get("expect_edits"):
+            from plugins.platforms.telegram.telegram_split_replies import split_reply_delimited
+            parts = split_reply_delimited(
+                content, max_parts=getattr(self, "_split_replies_max_parts", 8), with_offsets=True,
+            )
+            if len(parts) > 1:
+                if as_file := await hand_off_split(self, chat_id, content, self.reply_message_count(content, metadata),
+                                                   reply_to=reply_to, metadata=metadata):
+                    return as_file
+                from plugins.platforms.telegram.delimiter_delivery import send_delimited
+                return await send_delimited(self, chat_id, content, parts, reply_to, split_metadata)
+        return await self._send_single_message(chat_id, content, reply_to, metadata)
+
+    async def send_reasoning(
+        self, chat_id: str, content: str, metadata: Optional[dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send reasoning in its own bubble, without delimiter planning."""
+        if not self._bot:
+            live = self._replacement_telegram_adapter()
+            if live is not None:
+                return await live.send_reasoning(chat_id, content, metadata)
+            if self._is_permanent_fatal() or not await self._wait_for_reconnection():
+                return SendResult(success=False, error="Not connected", retryable=not self._is_permanent_fatal())
+            live = self._replacement_telegram_adapter()
+            if not self._bot and live is not None:
+                return await live.send_reasoning(chat_id, content, metadata)
+            if not self._bot:
+                return SendResult(success=False, error="Not connected", retryable=True)
+        if getattr(self, "_send_path_degraded", False):
+            return SendResult(success=False, error="send_path_degraded", retryable=True)
+        if not content or not content.strip():
+            return SendResult(success=True, message_id=None)
+        return await self._send_single_message(chat_id, content, None, metadata)
+
+    async def _send_single_message(
+        self, chat_id: str, content: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
+    ) -> SendResult:
+        """Send one payload through upstream pacing, deadlines and partial-chunk receipts."""
+        async with self._chat_send_lock(chat_id):
             return await self._send_text_locked(chat_id, content, reply_to, metadata)
 
     async def _send_text_locked(
@@ -3477,6 +3563,9 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         """Send only the chunks a partial ``send()`` could not deliver (``undelivered_chunks``, or the never-attempted
         ``unattempted_chunks``), continuing the message-id sequence; ``None`` when no tail is certain-undelivered."""
         raw = result.raw_response if isinstance(result.raw_response, dict) else {}
+        if raw.get("delimited_resume") and self._bot:
+            from plugins.platforms.telegram.delimiter_delivery import resume_delimited
+            return await resume_delimited(self, chat_id, result, reply_to, metadata)
         if raw.get("undelivered_rich_parts") and self._bot:  # a rich part that never left: resend it rich
             return await resume_rich_parts(self, chat_id, result, metadata)
         undelivered = raw.get("undelivered_chunks") or raw.get("unattempted_chunks")
@@ -3732,8 +3821,9 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         prev_id = message_id
         thread_id = self._metadata_thread_id(metadata)
         for chunk in chunks[1:]:
-            reply_to_id = int(prev_id) if prev_id else None
-            thread_kwargs = self._thread_kwargs_for_send(chat_id, thread_id, metadata, reply_to_message_id=reply_to_id)
+            reply_to_id = int(prev_id) if prev_id and self._reply_to_mode != "off" else None
+            thread_kwargs = self._thread_kwargs_for_send(
+                chat_id, thread_id, metadata, reply_to_message_id=reply_to_id, reply_to_mode=self._reply_to_mode)
             sent_msg = await self._send_overflow_continuation(chat_id, chunk, reply_to_id, thread_kwargs, thread_id, metadata, finalize)
             flood = sent_msg if isinstance(sent_msg, SendResult) else None  # flood-refused: the caller holds off
             if sent_msg is None or flood:
@@ -3772,9 +3862,10 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
     def supports_draft_streaming(self, chat_type: Optional[str] = None, metadata: Optional[dict[str, Any]] = None) -> bool:
         """sendMessageDraft works for private chats only (Bot API 9.5) and needs PTB >= 22.6; groups and
         older installs use the edit-based path. ``rich_drafts`` controls draft *format*, not availability."""
-        if not self._bot or not hasattr(self._bot, "send_message_draft"):
-            return False
-        return (chat_type or "").lower() in {"dm", "private"}
+        supported = bool(self._bot and hasattr(self._bot, "send_message_draft")
+                         and (chat_type or "").lower() in {"dm", "private"})
+        self._trace_send("draft_support", supported=supported, chat_type=chat_type or "")
+        return supported
 
     async def send_draft(self, chat_id: str, draft_id: int, content: str, metadata: Optional[dict[str, Any]] = None) -> SendResult:
         """Stream a partial message via ``sendRichMessageDraft`` (when rich is enabled and supported) else
@@ -6663,6 +6754,10 @@ def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:
     _telegram_extra = telegram_cfg.get("extra") if isinstance(telegram_cfg.get("extra"), dict) else {}
     _telegram_rtm = telegram_cfg["reply_to_mode"] if "reply_to_mode" in telegram_cfg else _telegram_extra.get("reply_to_mode")
     if _telegram_rtm is not None:
+        # The env bridge is skipped for a multiplexed secondary profile.  Keep the
+        # value in PlatformConfig.extra as the profile-local source of truth so the
+        # adapter factory does not fall back to its ``first`` default there.
+        extras.setdefault("reply_to_mode", "off" if _telegram_rtm is False else str(_telegram_rtm).lower())
         _set_env("TELEGRAM_REPLY_TO_MODE", "off" if _telegram_rtm is False else str(_telegram_rtm).lower())
     _bridge_gate("allow_from", "TELEGRAM_ALLOWED_USERS", telegram_cfg.get("allow_from"))
     _bridge_gate("group_allow_from", "TELEGRAM_GROUP_ALLOWED_USERS", telegram_cfg.get("group_allow_from") or _telegram_extra.get("group_allow_from"))
@@ -6672,6 +6767,8 @@ def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:
     for _key in ("guest_mode", "disable_link_previews", "observe_unmentioned_group_messages", "free_response_topics"):
         if _key in telegram_cfg:
             extras.setdefault(_key, telegram_cfg[_key])
+    if "split_replies" in telegram_cfg:
+        extras.setdefault("split_replies", telegram_cfg["split_replies"])
     # Pass through telegram-specific extra keys but EXCLUDE generic shared-config keys: _merge_platform_map
     # already applied top-level-over-nested precedence and re-emitting them via dict.update() would undo it.
     _GENERIC_MERGE_KEYS = {

@@ -19,7 +19,8 @@ async def _deliver(monkeypatch, *, show_reasoning: bool, already_sent: bool, is_
 
     monkeypatch.setattr(gateway_run, "_load_gateway_config",
                         lambda: {"display": {"show_reasoning": show_reasoning}})
-    adapter = ProgressCaptureAdapter(platform=Platform.TELEGRAM)
+    # Telegram uses its dedicated unsplit send before this completion seam.
+    adapter = ProgressCaptureAdapter(platform=Platform.DISCORD)
     if ledger is not None:
         async def _ledger(event, session_key, response, *, error=None, **_kw):
             ledger.append(response)
@@ -27,7 +28,7 @@ async def _deliver(monkeypatch, *, show_reasoning: bool, already_sent: bool, is_
 
         adapter.ledger_attempted_final = _ledger
     runner = _make_runner(adapter)
-    source = SessionSource(platform=Platform.TELEGRAM, chat_id="42", chat_type="dm", is_bot=is_bot)
+    source = SessionSource(platform=Platform.DISCORD, chat_id="42", chat_type="dm", is_bot=is_bot)
     event = MessageEvent(text="hi", message_type=MessageType.TEXT, source=source, message_id="1")
     result = {"final_response": "the answer is 42", "last_reasoning": "thinking hard about it",
               "already_sent": already_sent}
@@ -39,7 +40,7 @@ async def _deliver(monkeypatch, *, show_reasoning: bool, already_sent: bool, is_
         session_id = "s1"
 
     returned = await runner._hmwa_deliver_turn_response(
-        event, source, _Entry(), "agent:main:telegram:dm:42", None, result, [], response, None, False)
+        event, source, _Entry(), "agent:main:discord:dm:42", None, result, [], response, None, False)
     return adapter, returned
 
 
