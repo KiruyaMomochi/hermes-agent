@@ -484,7 +484,7 @@ def _strip_orphaned_tool_blocks(result: List[Dict[str, Any]]) -> None:
         kept = [b for b in m["content"] if not (_block_type(b) == "tool_use" and b.get("id") in orphaned)]
         # A signed thinking block on this turn was signed against the ORIGINAL content and is now
         # dead (400 "thinking blocks in the latest assistant message cannot be modified"). Flag so
-        # _manage_thinking_signatures demotes it.
+        # _manage_thinking_signatures drops it.
         if len(kept) != len(m["content"]) and _has_block_type(m["content"], _THINKING_TYPES):
             m["_thinking_signature_invalidated"] = True
         m["content"] = kept if kept else [_text_block("(tool call removed)")]
@@ -533,29 +533,25 @@ def _merge_consecutive_roles(result: List[Dict[str, Any]]) -> List[Dict[str, Any
 def _keep_valid_latest_thinking(content: List[Any], signature_dead: bool) -> List[Any]:
     """Preserve intact thinking blocks unless our repair invalidated their signature.
 
-    When ``signature_dead`` is true, demote readable thinking to plain text and
-    drop dataless redacted blocks because their authenticated form is no longer
-    valid.  Otherwise the original blocks are replayed verbatim, regardless of
-    whether they carry a signature.
+    When ``signature_dead`` is true, drop all thinking/redacted_thinking blocks.
+    Otherwise the original blocks are replayed verbatim, regardless of whether
+    they carry a signature. Dataless redacted blocks always remain unusable.
     """
     new_content = []
     for b in content:
         if _block_type(b) not in _THINKING_TYPES:
             new_content.append(b)
             continue
-        if b.get("type") == "redacted_thinking" and not b.get("data"):
+        if signature_dead or (b.get("type") == "redacted_thinking" and not b.get("data")):
             continue
-        if not signature_dead:
-            new_content.append(b)
-        elif b.get("thinking"):
-            new_content.append(_text_block(b["thinking"]))
+        new_content.append(b)
     return new_content
 
 
 def _manage_thinking_signatures(result: List[Dict[str, Any]], base_url: str | None, model: str | None) -> None:
     """Replay every intact Anthropic thinking block on every endpoint.
 
-    The only reason to demote a block is a mutation we performed while repairing
+    The only reason to drop a block is a mutation we performed while repairing
     tool pairing.  Endpoint identity and message age do not invalidate a block.
     """
     for _, m in _assistant_block_lists(result):
