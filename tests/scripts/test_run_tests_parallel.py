@@ -314,7 +314,7 @@ def test_runner_isolates_collection_time_hermes_home(tmp_path: Path) -> None:
     runner must give each pytest subprocess a clean HERMES_HOME from process
     start, not only once test execution begins.
     """
-    repo_root = Path(__file__).resolve().parent.parent
+    repo_root = Path(__file__).resolve().parent.parent.parent
     runner = repo_root / "scripts" / "run_tests_parallel.py"
     real_home = tmp_path / "real-hermes-home"
     real_home.mkdir()
