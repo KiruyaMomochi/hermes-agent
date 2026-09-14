@@ -11,10 +11,6 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.image_eviction_policy import outbound_image_retire_count
-from agent.anthropic_endpoints import (
-    _is_deepseek_anthropic_endpoint, _is_kimi_family_endpoint, _is_nous_portal_endpoint,
-    _is_third_party_anthropic_endpoint, _model_name_is_deepseek_thinking,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -547,54 +543,34 @@ def _merge_consecutive_roles(result: List[Dict[str, Any]]) -> List[Dict[str, Any
 
 
 def _keep_valid_latest_thinking(content: List[Any], signature_dead: bool) -> List[Any]:
-    """Latest assistant turn on direct Anthropic: keep signed thinking, demote unsigned to text so
-    the reasoning isn't lost. If orphan-stripping mutated THIS turn every signature is dead (and a
-    bare signed block with no tool_use is also invalid), so demote ALL of them."""
+    """Preserve intact thinking blocks, demoting only blocks invalidated by local repair."""
     new_content = []
     for b in content:
         if _block_type(b) not in _THINKING_TYPES:
             new_content.append(b)
             continue
         is_redacted = b.get("type") == "redacted_thinking"
-        signed = b.get("data") if is_redacted else b.get("signature")  # redacted 'data' IS the signature
-        if signed and not signature_dead:
+        if is_redacted and not b.get("data"):
+            continue
+        if not signature_dead:
             new_content.append(b)
-        elif (signature_dead or not is_redacted) and b.get("thinking"):
-            new_content.append(_text_block(b["thinking"]))  # demote to plain text; dataless redacted dropped
+        elif not is_redacted and b.get("thinking"):
+            new_content.append(_text_block(b["thinking"]))
     return new_content
 
 
 def _manage_thinking_signatures(result: List[Dict[str, Any]], base_url: str | None, model: str | None) -> None:
-    """Strip or preserve thinking blocks per endpoint. Mutates ``result`` in place.
+    """Replay every intact Anthropic thinking block regardless of endpoint or message age.
 
-    Anthropic signs thinking blocks against the full turn; any upstream mutation invalidates them
-    (400 "Invalid signature in thinking block"), so on direct Anthropic only the LATEST assistant
-    turn keeps signed blocks. Signatures are proprietary: third-party endpoints strip all thinking.
-    Kimi replays as-is; DeepSeek needs unsigned blocks round-tripped but rejects signed ones. Nous
-    Portal proxies Claude with sticky sessions and validates the same signatures, so it takes the
-    native path despite not being anthropic.com.
+    Only a local mutation during tool-pair repair invalidates a block. ``base_url`` and ``model``
+    remain parameters of the conversion contract but do not determine whether stored reasoning is
+    replayable.
     """
-    is_third_party = _is_third_party_anthropic_endpoint(base_url) and not _is_nous_portal_endpoint(base_url)
-    is_kimi = _is_kimi_family_endpoint(base_url, model)
-    is_deepseek = _is_deepseek_anthropic_endpoint(base_url) or (
-        is_third_party and _model_name_is_deepseek_thinking(model)
-    )
-    last_assistant_idx = next((i for i in range(len(result) - 1, -1, -1) if result[i].get("role") == "assistant"), None)
-    for idx, m in _assistant_block_lists(result):
-        if is_kimi:
-            pass  # shared cleanup below still strips cache markers + the flag
-        elif is_deepseek:
-            # Strip signed (or redacted-with-data), keep unsigned.
-            new_content = [
-                b for b in m["content"]
-                if _block_type(b) not in _THINKING_TYPES or not (b.get("signature") or b.get("data"))
-            ]
-            m["content"] = new_content or [_text_block("(empty)")]
-        elif is_third_party or idx != last_assistant_idx:
-            m["content"] = _strip_thinking(m["content"]) or [_text_block("(thinking elided)")]
-        else:
-            new_content = _keep_valid_latest_thinking(m["content"], bool(m.get("_thinking_signature_invalidated")))
-            m["content"] = new_content or [_text_block("(empty)")]
+    for _, m in _assistant_block_lists(result):
+        new_content = _keep_valid_latest_thinking(
+            m["content"], bool(m.get("_thinking_signature_invalidated")),
+        )
+        m["content"] = new_content or [_text_block("(empty)")]
         # cache_control on thinking blocks interferes with signature validation.
         for b in m["content"]:
             if _block_type(b) in _THINKING_TYPES:
@@ -712,9 +688,8 @@ def convert_messages_to_anthropic(
 ) -> Tuple[Optional[Any], List[Dict]]:
     """Convert OpenAI-format messages to Anthropic format -> ``(system, messages)``. System is
     extracted into its own param (a string, or a block list when cache_control is present).
-    ``base_url``/``model`` drive thinking-signature policy — third-party endpoints strip signatures
-    (proprietary, they 400 on them); Kimi-family endpoints/models keep unsigned
-    reasoning_content-derived blocks, which Kimi requires even when empty."""
+    Historical thinking blocks replay uniformly; ``base_url`` and ``model`` are accepted for the
+    surrounding transport contract, not as reasoning-validity heuristics."""
     system = None
     result: List[Dict[str, Any]] = []
     for m in messages:

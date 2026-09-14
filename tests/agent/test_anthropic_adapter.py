@@ -9,8 +9,9 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.anthropic_adapter import build_anthropic_client, build_anthropic_kwargs
+from agent.anthropic_adapter import build_anthropic_client, build_anthropic_bedrock_client, build_anthropic_kwargs
 from agent.anthropic_credentials import _is_oauth_token, _refresh_oauth_token, _write_claude_code_credentials, is_claude_code_token_valid, read_claude_code_credentials, resolve_anthropic_token, run_oauth_setup_token
+from agent.anthropic_endpoints import _is_azure_anthropic_endpoint
 from agent.credential_pool import PooledCredential
 from agent.anthropic_message_convert import _to_plain_data, convert_messages_to_anthropic, convert_tools_to_anthropic, normalize_model_name
 from agent.transports import get_transport
@@ -66,6 +67,10 @@ class TestBuildAnthropicClient:
             assert "context-1m-2025-08-07" not in betas
             assert "oauth-2025-04-20" not in betas  # OAuth-only beta NOT present
             assert "claude-code-20250219" not in betas  # OAuth-only beta NOT present
+
+
+
+
 
 
     def test_opencode_endpoint_gets_attribution_headers(self):
@@ -152,6 +157,8 @@ class TestBuildAnthropicClient:
             assert kwargs["max_retries"] == 0
 
 
+
+
 class TestReadClaudeCodeCredentials:
     @pytest.fixture(autouse=True)
     def no_keychain(self, monkeypatch):
@@ -184,6 +191,9 @@ class TestReadClaudeCodeCredentials:
 
         creds = read_claude_code_credentials()
         assert creds is None
+
+
+
 
 
 class TestIsClaudeCodeTokenValid:
@@ -395,6 +405,7 @@ class TestResolveAnthropicToken:
         assert resolve_anthropic_token() == "cc-auto-token"
 
 
+
 class TestRefreshOauthToken:
     def test_returns_none_without_refresh_token(self, tmp_path, monkeypatch):
         monkeypatch.setattr("agent.anthropic_credentials.Path.home", lambda: tmp_path)
@@ -592,6 +603,7 @@ class TestRunOauthSetupToken:
         assert token is None
 
 
+
 # ---------------------------------------------------------------------------
 # Model name normalization
 # ---------------------------------------------------------------------------
@@ -600,6 +612,8 @@ class TestRunOauthSetupToken:
 class TestNormalizeModelName:
     def test_strips_anthropic_prefix(self):
         assert normalize_model_name("anthropic/claude-sonnet-4-20250514") == "claude-sonnet-4-20250514"
+
+
 
 
     def test_preserve_dots_for_alibaba_dashscope(self):
@@ -677,6 +691,13 @@ class TestConvertTools:
 
 
 class TestConvertMessages:
+
+
+
+
+
+
+
 
 
     def test_strips_tool_use_when_result_not_immediately_adjacent(self):
@@ -885,6 +906,9 @@ class TestConvertMessages:
         assert tool_block["cache_control"] == {"type": "ephemeral"}
 
 
+
+
+
     def test_empty_user_message_string_gets_placeholder(self):
         """Empty user message strings should get '(empty message)' placeholder.
 
@@ -897,6 +921,8 @@ class TestConvertMessages:
         _, result = convert_messages_to_anthropic(messages)
         assert result[0]["role"] == "user"
         assert result[0]["content"] == "(empty message)"
+
+
 
 
     def test_leading_assistant_after_compaction_gets_user_turn_prepended(self):
@@ -919,12 +945,17 @@ class TestConvertMessages:
         )
 
 
+
+
+
 # ---------------------------------------------------------------------------
 # Build kwargs
 # ---------------------------------------------------------------------------
 
 
 class TestBuildAnthropicKwargs:
+
+
 
 
     def test_reasoning_config_maps_to_manual_thinking_for_pre_4_6_models(self):
@@ -958,6 +989,33 @@ class TestBuildAnthropicKwargs:
         assert kwargs["max_tokens"] == 4096
 
 
+
+
+
+
+    def test_supports_fast_mode_predicate(self):
+        """The speed-param allowlist tracks the live fast-mode docs.
+
+        Per https://platform.claude.com/docs/en/build-with-claude/fast-mode:
+        Opus 4.8 and Opus 5 support ``speed: "fast"``. Opus 4.6 LOST fast
+        mode (param silently ignored → standard speed at standard billing);
+        Opus 4.7 hard-400s. Dedicated ``…-fast`` model ids select fast
+        inference via the model field and must not also get the param.
+        """
+        from agent.anthropic_adapter import _supports_fast_mode
+        assert _supports_fast_mode("claude-opus-4-8") is True
+        assert _supports_fast_mode("claude-opus-4.8") is True
+        assert _supports_fast_mode("anthropic/claude-opus-4-8") is True
+        assert _supports_fast_mode("claude-opus-5") is True
+        assert _supports_fast_mode("anthropic/claude-opus-5") is True
+        assert _supports_fast_mode("claude-opus-4-6") is False
+        assert _supports_fast_mode("anthropic/claude-opus-4-6") is False
+        assert _supports_fast_mode("claude-opus-4-7") is False
+        assert _supports_fast_mode("claude-opus-4-8-fast") is False
+        assert _supports_fast_mode("claude-sonnet-4-6") is False
+        assert _supports_fast_mode("claude-haiku-4-5") is False
+        assert _supports_fast_mode("") is False
+
     def test_fable_class_models_route_as_adaptive_thinking(self):
         """Invariant: unknown/new Claude models default to the modern (4.7+)
         contract — adaptive thinking, xhigh-capable, sampling-params-forbidden —
@@ -969,6 +1027,7 @@ class TestBuildAnthropicKwargs:
             _supports_adaptive_thinking,
             _supports_xhigh_effort,
             _forbids_sampling_params,
+            _get_anthropic_max_output,
         )
         # New / unknown Claude models → modern contract by default.
         for m in (
@@ -980,6 +1039,9 @@ class TestBuildAnthropicKwargs:
             assert _supports_adaptive_thinking(m) is True, m
             assert _supports_xhigh_effort(m) is True, m
             assert _forbids_sampling_params(m) is True, m
+        # 1M-context reasoning model → highest output ceiling.
+        assert _get_anthropic_max_output("anthropic/claude-fable-5") == 128_000
+
 
 
     def test_non_claude_anthropic_models_use_manual_path(self):
@@ -1028,9 +1090,33 @@ class TestBuildAnthropicKwargs:
         assert "fast-mode-2026-02-01" not in beta_header
 
 
+
+
+
+
+
+
+
+
+
+
+
 # ---------------------------------------------------------------------------
 # Model output limit lookup
 # ---------------------------------------------------------------------------
+
+
+class TestGetAnthropicMaxOutput:
+    def test_opus_4_6(self):
+        from agent.anthropic_adapter import _get_anthropic_max_output
+        assert _get_anthropic_max_output("claude-opus-4-6") == 128_000
+
+
+
+
+
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -1040,6 +1126,15 @@ class TestBuildAnthropicKwargs:
 
 class TestToPlainData:
 
+
+
+
+    def test_deep_nesting_is_capped(self):
+        deep = "leaf"
+        for _ in range(25):
+            deep = {"nested": deep}
+        result = _to_plain_data(deep)
+        assert isinstance(result, dict)
 
     def test_plain_values_pass_through(self):
         assert _to_plain_data("hello") == "hello"
@@ -1112,6 +1207,8 @@ class TestNormalizeResponse:
         assert nr3.finish_reason == "length"
 
 
+
+
 # ---------------------------------------------------------------------------
 # Role alternation
 # ---------------------------------------------------------------------------
@@ -1149,6 +1246,8 @@ class TestRoleAlternation:
 class TestThinkingBlockSignatureManagement:
     """Tests for the thinking block handling strategy:
     strip from old turns, preserve latest signed, downgrade unsigned."""
+
+
 
 
     def test_redacted_thinking_with_data_preserved(self):
@@ -1211,8 +1310,9 @@ class TestThinkingBlockSignatureManagement:
                 assert "cache_control" not in block
 
 
-    def test_multi_turn_conversation_preserves_only_last(self):
-        """Full multi-turn conversation: only last assistant keeps thinking."""
+
+    def test_multi_turn_conversation_preserves_intact_historical_thinking(self):
+        """Message age alone does not invalidate an intact thinking signature."""
         messages = [
             {"role": "user", "content": "Question 1"},
             {
@@ -1243,22 +1343,17 @@ class TestThinkingBlockSignatureManagement:
 
         assistants = [m for m in result if m["role"] == "assistant"]
         assert len(assistants) == 3
-
-        # First two: no thinking blocks
-        for a in assistants[:2]:
-            assert not any(
-                b.get("type") in {"thinking", "redacted_thinking"}
-                for b in a["content"]
-                if isinstance(b, dict)
+        signatures = [
+            next(
+                block["signature"]
+                for block in assistant["content"]
+                if isinstance(block, dict) and block.get("type") == "thinking"
             )
-
-        # Last one: thinking preserved
-        last_thinking = [
-            b for b in assistants[2]["content"]
-            if isinstance(b, dict) and b.get("type") == "thinking"
+            for assistant in assistants
         ]
-        assert len(last_thinking) == 1
-        assert last_thinking[0]["signature"] == "sig_3"
+        assert signatures == ["sig_1", "sig_2", "sig_3"]
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -1302,6 +1397,7 @@ class TestToolChoice:
         assert kwargs["tool_choice"] == {"type": "tool", "name": "search"}
 
 
+
 # ---------------------------------------------------------------------------
 # max_tokens resolver — openclaw/openclaw#66664 port
 # ---------------------------------------------------------------------------
@@ -1320,6 +1416,9 @@ class TestResolvePositiveMaxTokens:
         assert _resolve_positive_anthropic_max_tokens(0) is None
 
 
+
+
+
     def test_nan_returns_none(self):
         assert _resolve_positive_anthropic_max_tokens(float("nan")) is None
 
@@ -1330,6 +1429,8 @@ class TestResolvePositiveMaxTokens:
         assert _resolve_positive_anthropic_max_tokens(False) is None
 
 
+
+
 class TestResolveMessagesMaxTokens:
     """Integration tests for the full Messages resolver."""
 
@@ -1337,6 +1438,9 @@ class TestResolveMessagesMaxTokens:
         assert _resolve_anthropic_messages_max_tokens(
             8192, "claude-opus-4-6"
         ) == 8192
+
+
+
 
 
     def test_sub_one_float_falls_back(self):
@@ -1386,6 +1490,10 @@ class TestConvertToolsToAnthropicDedup:
         assert len(result) == 3  # lcm_grep, lcm_describe, lcm_expand
 
 
+    def test_none_tools_returns_empty(self):
+        assert convert_tools_to_anthropic(None) == []
+
+
 class TestBlankTextBlockFiltering:
     """Regression tests for blank text block filtering in _convert_assistant_message.
 
@@ -1399,6 +1507,7 @@ class TestBlankTextBlockFiltering:
     def _convert(self, message):
         from agent.anthropic_message_convert import _convert_assistant_message
         return _convert_assistant_message(message)
+
 
 
     def test_normal_path_filters_none_text_block_without_crashing(self):
@@ -1421,6 +1530,7 @@ class TestBlankTextBlockFiltering:
         tool_blocks = [b for b in blocks if b.get("type") == "tool_use"]
         assert len(text_blocks) == 0, f"None text block not filtered: {text_blocks}"
         assert len(tool_blocks) == 1
+
 
 
     def test_normal_path_relocates_cache_control_from_dropped_block(self):
@@ -1499,6 +1609,7 @@ class TestAllBlankFallbackAndNonStringText:
     def _convert(self, message):
         from agent.anthropic_message_convert import _convert_assistant_message
         return _convert_assistant_message(message)
+
 
 
     def test_sole_cache_marked_blank_block_relocates_marker_to_placeholder(self):
@@ -1852,5 +1963,5 @@ def test_unsupported_inline_image_subtype_downgrades_to_text_for_anthropic(monke
     blocks = result[0]["content"]
     assert [b["type"] for b in blocks] == ["image", "text", "image"]
     assert blocks[0]["source"] == {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}
-    assert "image/svg+xml" in blocks[1]["text"]
+    assert blocks[1]["text"] == "[image omitted: image/svg+xml is not a supported image format]"
     assert blocks[2]["source"]["media_type"] == "image/jpeg"
