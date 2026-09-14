@@ -19,6 +19,8 @@ Three invariants:
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any, cast
+
 
 import pytest
 
@@ -103,6 +105,80 @@ class TestConsumerDeclaredFinal:
         sc.finish()
         await task
         assert adapter.send_calls[-1]["content"] == "plain answer"
+
+    def test_telegram_turn_runner_keeps_reasoning_out_of_stream_final(self):
+        from gateway.run_turn_runner import TurnRunner
+
+        finished = []
+        consumer = SimpleNamespace(finish=lambda text=None: finished.append(text))
+        ctx = SimpleNamespace(result_holder=[None], source=SimpleNamespace(platform="telegram"))
+        turn_runner = TurnRunner(cast(Any, SimpleNamespace()), cast(Any, ctx))
+        result = {
+            "final_response": "final answer", "last_reasoning": "stored reasoning",
+            "completed": True,
+        }
+
+        displayed = turn_runner._finish_stream_consumer(result, [], consumer)
+
+        assert displayed == "final answer"
+        assert finished == ["final answer"]
+        assert result["final_response"] == "final answer", "canonical final must remain unchanged"
+
+    @pytest.mark.asyncio
+    async def test_telegram_reasoning_uses_one_public_unsplit_adapter_send(self, monkeypatch):
+        from gateway.config import Platform
+        from gateway.platforms.event import SessionSource
+        from gateway.run import GatewayRunner
+        import gateway.run as run_module
+
+        monkeypatch.setattr(
+            run_module, "_load_gateway_config",
+            lambda: {"display": {"show_reasoning": True, "reasoning_style": "code"}},
+        )
+        calls = []
+
+        async def send_reasoning(chat_id, content, metadata=None):
+            calls.append((chat_id, content, metadata))
+
+        adapter = SimpleNamespace(
+            send_reasoning=send_reasoning,
+        )
+        runner = object.__new__(GatewayRunner)
+        runner._adapter_for_source = lambda _source: adapter
+        source = SessionSource(platform=Platform.TELEGRAM, chat_id="D1", user_id="U1")
+
+        await runner._hmwa_deliver_telegram_reasoning(
+            "checking A\n---\nchecking B", source, {"thread_id": "42"},
+        )
+
+        assert len(calls) == 1
+        assert calls[0][0] == "D1"
+        assert "checking A\n---\nchecking B" in calls[0][1]
+        assert calls[0][2] == {"thread_id": "42"}
+
+    @pytest.mark.asyncio
+    async def test_telegram_reasoning_display_gate_disables_delivery(self, monkeypatch):
+        from gateway.config import Platform
+        from gateway.platforms.event import SessionSource
+        from gateway.run import GatewayRunner
+        import gateway.run as run_module
+
+        monkeypatch.setattr(
+            run_module, "_load_gateway_config",
+            lambda: {"display": {"show_reasoning": False}},
+        )
+        calls = []
+
+        async def send_reasoning(*args, **kwargs):
+            calls.append((args, kwargs))
+
+        runner = object.__new__(GatewayRunner)
+        runner._adapter_for_source = lambda source: SimpleNamespace(send_reasoning=send_reasoning)
+        source = SessionSource(platform=Platform.TELEGRAM, chat_id="D1", user_id="U1")
+
+        await runner._hmwa_deliver_telegram_reasoning("hidden", source)
+
+        assert calls == []
 
 
 class TestInterimSendContract:
@@ -222,6 +298,56 @@ class TestFinalAdoptionGuards:
 
 
 class TestQueuedLaneReconcile:
+    @pytest.mark.asyncio
+    async def test_reasoning_display_does_not_change_canonical_match(self):
+        """Gateway presentation must not be used to reconcile the streamed final."""
+        from gateway.run import GatewayRunner
+
+        seen = []
+        consumer = SimpleNamespace(
+            final_response_sent=True,
+            final_content_delivered=True,
+            delivered_final_matches=lambda text: seen.append(text) or True,
+        )
+        response = {
+            "final_response": "> 💭 **Reasoning:**\n> checking\n\nanswer",
+            "_canonical_final_response": "answer",
+        }
+        turn_ctx = SimpleNamespace(
+            stream_consumer_holder=[consumer], source=SimpleNamespace(chat_id="D1"),
+            session_key="session-1",
+        )
+        await GatewayRunner._run_agent_mark_streamed_delivery(
+            object.__new__(GatewayRunner), response, turn_ctx,
+        )
+        assert response["already_sent"] is True
+        assert seen == ["answer", "answer"]
+
+    @pytest.mark.asyncio
+    async def test_split_canonical_delivery_suppresses_corrective_combined_send(self):
+        """Split chunks reconcile against the canonical final, not its display wrapper."""
+        from gateway.run import GatewayRunner
+
+        seen = []
+        consumer = SimpleNamespace(
+            final_response_sent=True, final_content_delivered=True,
+            _turn_split_delivery=True,
+            delivered_final_matches=lambda text: seen.append(text) or True,
+        )
+        response = {
+            "final_response": "> 💭 **Reasoning:**\n> checking\n\nlong split answer",
+            "_canonical_final_response": "long split answer",
+        }
+        turn_ctx = SimpleNamespace(
+            stream_consumer_holder=[consumer], source=SimpleNamespace(chat_id="D1"),
+            session_key="session-1",
+        )
+        await GatewayRunner._run_agent_mark_streamed_delivery(
+            object.__new__(GatewayRunner), response, turn_ctx,
+        )
+        assert response["already_sent"] is True
+        assert seen == ["long split answer", "long split answer"]
+
     @pytest.mark.asyncio
     async def test_queued_first_response_edits_in_place(self):
         from gateway.run import GatewayRunner

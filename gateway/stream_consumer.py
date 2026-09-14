@@ -524,7 +524,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                      _reason, self.chat_id)
         return False
 
-    def on_delta(self, text: str) -> None:
+    def on_delta(self, text: Optional[str]) -> None:
         """Thread-safe callback from the agent's worker thread.  ``None`` signals a tool
         boundary: the current message is finalized and subsequent text goes out as a new
         message below any tool-progress messages."""
@@ -570,7 +570,6 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                     if _is_intentional_silence_response(self._clean_for_display(self._accumulated)):
                         await self._suppress_silence_marker()
                         return
-
                 if self._should_edit(tick) and (
                     self._accumulated or (self._use_native_streaming and self._tool_progress_active)
                 ):

@@ -1741,7 +1741,7 @@ class TurnRunner:
             )
         ctx.result_holder[0] = result
         if stream_consumer is None:
-            return
+            return result.get("final_response") if isinstance(result, dict) else None
         # Pass final_response as the authoritative finalize payload: it includes post-stream
         # augmentation (verifier footer, explainer) the accumulator never saw. Adopt ONLY a genuinely
         # completed final: interrupt paths return {interrupted: True, completed: False} with a
@@ -1755,14 +1755,19 @@ class TurnRunner:
             fr = result.get("final_response")
             if isinstance(fr, str) and fr.strip() and fr != "(empty)":
                 _final_for_stream = fr
+                if str(getattr(ctx.source.platform, "value", ctx.source.platform)) != "telegram":
+                    _final_for_stream = self._runner._hmwa_prepend_reasoning(
+                        result, fr, ctx.source, False,
+                    )
         if _final_for_stream is None:
             stream_consumer.finish()
-            return
+            return result.get("final_response") if isinstance(result, dict) else None
         # Duck-type safe: test doubles / older consumers may expose a zero-arg finish().
         try:
             stream_consumer.finish(_final_for_stream)
         except TypeError:
             stream_consumer.finish()
+        return _final_for_stream
 
     def _restore_telegram_thread_id_after_split(self, agent_session_id) -> None:
         """Telegram DM whose source.thread_id was lost in the session split (synthetic/recovered
@@ -1950,11 +1955,15 @@ class TurnRunner:
         agent_history, observed_group_context, history_media_paths = self._load_turn_history(agent, reused_cached_agent)
         persist_msg, persist_ts = self._prepare_turn_message(agent_history)
         result = self._run_conversation_with_approval(agent, agent_history, observed_group_context, persist_msg, persist_ts)
-        self._finish_stream_consumer(result, agent_history, stream_consumer)
+        canonical_final_response = result.get("final_response")
+        streamed_delivery_response = self._finish_stream_consumer(result, agent_history, stream_consumer)
         # The streaming-TTS consumer's finish() runs on the outer loop thread after the executor
         # returns, so early run_sync returns are also finalised.
         # See the outer finally/completion section below. See #60671.
-        final_response = result.get("final_response")
+        final_response = streamed_delivery_response
+        # Keep the exact payload handed to finish() separate from later display-only
+        # decoration (reasoning, footer, and other gateway presentation).
+
         # Actual token counts from the agent instance used for this run.
         agent = ctx.agent_holder[0]
         has_comp = bool(agent) and hasattr(agent, "context_compressor")
@@ -1990,12 +1999,14 @@ class TurnRunner:
                 final_response = f"⚠️ {result['error']}" if result.get("error") else ""
             # NOTE: deliberately omits agent_persisted/last_reasoning/response_* — the caller
             # defaults agent_persisted differently when the key is absent.
-            return {"final_response": final_response, **common}
+            return {"final_response": final_response, "_canonical_final_response": canonical_final_response, **common}
         final_response = self._append_auto_media_tags(final_response, result, agent_history, history_media_paths)
         # Auto-titling runs at TURN START (agent/turn_context.py) from the user's message alone, so a
         # failed/interrupted turn is still titled.
         return {
-            "final_response": final_response, "last_reasoning": result.get("last_reasoning"), **common,
+            "final_response": final_response, "_canonical_final_response": canonical_final_response,
+            "_streamed_delivery_response": streamed_delivery_response,
+            "last_reasoning": result.get("last_reasoning"), **common,
             "response_previewed": result.get("response_previewed", False),
             "response_transformed": result.get("response_transformed", False),
             # Lets the persistence block tell whether the codex app-server path self-persisted (it

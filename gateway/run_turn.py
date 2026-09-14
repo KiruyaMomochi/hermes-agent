@@ -1610,9 +1610,8 @@ class GatewayTurnMixin:
         "subtext": ("-# 💭 Reasoning", "-# ", "-#"), "blockquote": ("> 💭 **Reasoning:**", "> ", ">")
     }
 
-    def _hmwa_prepend_reasoning(self, agent_result, response, source, _intentional_silence):
-        """Prepend the last reasoning block when show_reasoning is on for this platform. Mattermost
-        requires an explicit per-platform opt-in (scratch text, not final-answer content)."""
+    def _hmwa_reasoning_message(self, last_reasoning, source, _intentional_silence):
+        """Build the visible reasoning block under the existing per-platform display gate."""
         from gateway.run import _load_gateway_config, _platform_config_key, _resolve_gateway_display_bool
         try:
             _show_reasoning_effective = _resolve_gateway_display_bool(
@@ -1624,9 +1623,8 @@ class GatewayTurnMixin:
             _show_reasoning_effective = (
                 False if source.platform == Platform.MATTERMOST else getattr(self, "_show_reasoning", False)
             )
-        last_reasoning = agent_result.get("last_reasoning")
-        if not (_show_reasoning_effective and response and not _intentional_silence and last_reasoning):
-            return response
+        if not (_show_reasoning_effective and not _intentional_silence and last_reasoning):
+            return ""
         from gateway.stream_consumer_fences import escape_code_fences_for_display
         # Collapse long reasoning to keep messages readable
         lines = last_reasoning.strip().splitlines()
@@ -1646,10 +1644,36 @@ class GatewayTurnMixin:
         if _quote:
             header, prefix, empty = _quote
             _quoted = "\n".join(f"{prefix}{ln}" if ln else empty for ln in display_reasoning.splitlines())
-            return f"{header}\n{_quoted}\n\n{response}"
+            return f"{header}\n{_quoted}"
         # Escape ``` inside reasoning so inner fences don't break the outer code block.
         display_reasoning = escape_code_fences_for_display(display_reasoning)
-        return f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
+        return f"💭 **Reasoning:**\n```\n{display_reasoning}\n```"
+
+    def _hmwa_prepend_reasoning(self, agent_result, response, source, _intentional_silence):
+        """Keep the combined display used by non-Telegram platforms."""
+        if source.platform == Platform.TELEGRAM:
+            return response
+        reasoning = self._hmwa_reasoning_message(
+            agent_result.get("last_reasoning"), source, _intentional_silence,
+        )
+        if reasoning and response.startswith(f"{reasoning}\n\n"):
+            return response
+        return f"{reasoning}\n\n{response}" if reasoning and response else response
+
+    async def _hmwa_deliver_telegram_reasoning(self, reasoning, source, metadata=None) -> None:
+        """Deliver Telegram reasoning once through the adapter's unsplit public operation."""
+        message = self._hmwa_reasoning_message(reasoning, source, False)
+        adapter_for_source = getattr(self, "_adapter_for_source", None)
+        adapter = adapter_for_source(source) if callable(adapter_for_source) else None
+        send_reasoning = getattr(adapter, "send_reasoning", None)
+        if not message or not callable(send_reasoning):
+            return
+        try:
+            result = send_reasoning(source.chat_id, message, metadata=metadata)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            logger.debug("Telegram reasoning send failed: %s", exc)
 
     def _hmwa_runtime_footer_line(self, agent_result, source, _turn_seconds):
         """Runtime-metadata footer for the FINAL message of the turn; off by default
@@ -2239,6 +2263,11 @@ class GatewayTurnMixin:
                 _quick_key, run_generation, _run_start_session_id, _platform_name, _msg_start_time,
                 persist_user_display_kind=prepared.persist_user_display_kind,
             )
+            if source.platform == Platform.TELEGRAM and response and not _intentional_silence:
+                await self._hmwa_deliver_telegram_reasoning(
+                    agent_result.get("last_reasoning"), source,
+                    self._event_thread_metadata(event, source),
+                )
             response = self._hmwa_prepend_reasoning(agent_result, response, source, _intentional_silence)
             _footer_line = self._hmwa_runtime_footer_line(agent_result, source, _turn_seconds)
             # Streaming already delivered the body: the footer goes out as a trailing send instead.
@@ -3727,8 +3756,9 @@ class GatewayTurnMixin:
         # Delivery uses the finalized task result (empty/failure normalization), not raw ``result``.
         _delivery_result = response if isinstance(response, dict) else (result or {})
         first_response = _delivery_result.get("final_response", "")
+        canonical_first_response = _delivery_result.get("_canonical_final_response", first_response)
         _already_streamed = self._run_agent_stream_confirmed_final_delivery(
-            _sc, first_response, previewed=bool(_delivery_result.get("response_previewed")),
+            _sc, canonical_first_response, previewed=bool(_delivery_result.get("response_previewed")),
         )
         # Same silence predicate as the normal path, else this branch leaks the literal marker.
         if self._is_intentional_silence(_delivery_result, first_response):
@@ -4016,7 +4046,11 @@ class GatewayTurnMixin:
         _sc, source, session_key = turn_ctx.stream_consumer_holder[0], turn_ctx.source, turn_ctx.session_key
         if not isinstance(response, dict) or response.get("failed"):
             return
-        _final = response.get("final_response") or ""
+        _final = response.get("_streamed_delivery_response")
+        if _final is None:
+            _final = response.get("_canonical_final_response")
+        if _final is None:
+            _final = response.get("final_response") or ""
         _is_empty_sentinel = not _final or _final == "(empty)"
         # response_previewed: only suppress if that EXACT text was delivered, not unrelated commentary.
         # Unrelated commentary/progress must not be mistaken for the final response (#14238).
