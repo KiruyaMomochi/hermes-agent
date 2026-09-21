@@ -1301,6 +1301,13 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             return default
         return bool(value)
 
+    def _trace_send(self, event: str, **details: Any) -> None:
+        """Emit opt-in send-path diagnostics without message text or secrets."""
+        if getattr(self, "_trace_sends", False):
+            rendered = " ".join(f"{key}={value!r}" for key, value in details.items())
+            suffix = f" {rendered}" if rendered else ""
+            logger.warning("[%s] [Telegram trace] %s%s", self.name, event, suffix)
+
     def _link_preview_kwargs(self) -> dict[str, Any]:
         if not getattr(self, "_disable_link_previews", False):
             return {}
@@ -1600,9 +1607,11 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             "chat_id": normalize_telegram_chat_id(chat_id), "draft_id": int(draft_id), "rich_message": self._rich_message_payload(content)}
         payload.update(self._thread_kwargs_for_draft(chat_id, metadata))
         try:
-            return bool(await _await_with_thread_deadline(
+            result = bool(await _await_with_thread_deadline(
                 self._bot.do_api_request("sendRichMessageDraft", api_kwargs=payload),
                 timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False))
+            self._trace_send("rich_draft_send", success=result)
+            return result
         except Exception as exc:
             if self._is_rich_capability_error(exc):
                 self._rich_draft_disabled = True
@@ -3696,6 +3705,11 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
                             await asyncio.sleep(delay)
                     part_reply_to = reply_to if index == 0 else None
                     result = await self._send_single_message(chat_id, part, part_reply_to, split_metadata)
+                    self._trace_send(
+                        "split_part", index=index, total=len(parts), success=result.success,
+                        retryable=result.retryable, error_kind=result.error_kind,
+                        retry_after=result.retry_after, delivered=len(message_ids),
+                    )
                     if not result.success:
                         if index > 0:
                             delivered_prefix = content[:part_offset].rstrip()
@@ -4175,9 +4189,10 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
     def supports_draft_streaming(self, chat_type: Optional[str] = None, metadata: Optional[dict[str, Any]] = None) -> bool:
         """sendMessageDraft works for private chats only (Bot API 9.5) and needs PTB >= 22.6; groups and
         older installs use the edit-based path. ``rich_drafts`` controls draft *format*, not availability."""
-        if not self._bot or not hasattr(self._bot, "send_message_draft"):
-            return False
-        return (chat_type or "").lower() in {"dm", "private"}
+        supported = bool(self._bot and hasattr(self._bot, "send_message_draft")
+                         and (chat_type or "").lower() in {"dm", "private"})
+        self._trace_send("draft_support", supported=supported, chat_type=chat_type or "")
+        return supported
 
     async def send_draft(self, chat_id: str, draft_id: int, content: str, metadata: Optional[dict[str, Any]] = None) -> SendResult:
         """Stream a partial message via ``sendRichMessageDraft`` (when rich is enabled and supported) else
