@@ -3844,7 +3844,17 @@ class TelegramAdapter(BasePlatformAdapter):
                     _separate_chunk_indicator_from_fence(re.sub(r" \((\d+)/(\d+)\)$", r" \\(\1/\2\\)", chunk))
                     for chunk in chunks
                ]
-            return await self._send_chunks(chat_id, chunks, delivered, reply_to, metadata, error_types)
+            result = await self._send_chunks(chat_id, chunks, delivered, reply_to, metadata, error_types)
+            if (not result.success and isinstance(result.raw_response, dict)
+                    and result.raw_response.get("partial_overflow")
+                    and "delivered_prefix" not in result.raw_response):
+                raw_chunks = self.truncate_message(content, self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)
+                delivered_count = int(result.raw_response.get("delivered_chunks", len(delivered)))
+                result.raw_response["delivered_prefix"] = "".join(
+                    re.sub(r" \(\d+/\d+\)$", "", chunk)
+                    for chunk in raw_chunks[:delivered_count]
+                )
+            return result
         except Exception as e:
             classified = self._classify_send_exception(e, error_types)
             return self._with_partial_send(classified, chunks[len(delivered):], delivered, tail_certain=classified.retryable)
