@@ -451,8 +451,10 @@ def _rewrite_input_tool_for_vault(td: Dict[str, Any], available: set) -> Optiona
     the page). Say it where the temptation is."""
     if "browser_vault_fill" not in available:
         return td
+    from tools.registry import prompt_override
+    note = prompt_override("VAULT_NO_PASSWORD_NOTE")
     fn = td["function"]
-    return _fn_def({**fn, "description": fn.get("description", "") + _VAULT_NO_PASSWORD_NOTE})
+    return _fn_def({**fn, "description": fn.get("description", "") + (_VAULT_NO_PASSWORD_NOTE if note is None else note)})
 
 
 def _compose_rewriters(*fns):
