@@ -39,9 +39,9 @@ def prompt_override(key: str) -> Optional[str]:
         path = Path(get_hermes_home()) / "prompt_overrides.yaml"
         if not path.is_file():
             return None
-        import yaml
         with path.open("r", encoding="utf-8") as fh:
-            value = yaml.safe_load(fh)
+            from hermes_yaml import safe_load
+            value = safe_load(fh)
         for part in key.split("."):
             value = value.get(part) if isinstance(value, dict) else None
         return value if isinstance(value, str) else None

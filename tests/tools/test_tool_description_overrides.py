@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-import yaml
+from hermes_yaml import safe_dump
 
 from tools.registry import registry
 
@@ -24,7 +24,7 @@ def test_tool_description_override_is_read_from_profile_home(tmp_path, monkeypat
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     original = _description()
     (Path(tmp_path) / "prompt_overrides.yaml").write_text(
-        yaml.safe_dump({"tool_descriptions": {_TEST_TOOL: "profile description"}}),
+        safe_dump({"tool_descriptions": {_TEST_TOOL: "profile description"}}),
         encoding="utf-8",
     )
 
@@ -45,7 +45,7 @@ def test_vault_note_on_input_tools_follows_profile_override(tmp_path, monkeypatc
     td = {"type": "function", "function": {"name": "browser_type", "description": "Type text.", "parameters": {}}}
     default = _rewrite_input_tool_for_vault(td, {"browser_vault_fill"})["function"]["description"]
     (Path(tmp_path) / "prompt_overrides.yaml").write_text(
-        yaml.safe_dump({"VAULT_NO_PASSWORD_NOTE": " profile note"}), encoding="utf-8"
+        safe_dump({"VAULT_NO_PASSWORD_NOTE": " profile note"}), encoding="utf-8"
     )
     overridden = _rewrite_input_tool_for_vault(td, {"browser_vault_fill"})["function"]["description"]
 

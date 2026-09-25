@@ -810,9 +810,9 @@ def _load_prompt_overrides() -> dict:
         overrides_path = Path(get_hermes_home()) / "prompt_overrides.yaml"
         if not overrides_path.is_file():
             return {}
-        import yaml
         with open(overrides_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            from hermes_yaml import safe_load
+            data = safe_load(f)
         if not isinstance(data, dict):
             return {}
         return data
