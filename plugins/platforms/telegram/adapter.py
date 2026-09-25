@@ -563,8 +563,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._bot: Optional[Bot] = None
         self._webhook_mode: bool = False
         self._mention_patterns = self._compile_mention_patterns()
-        configured_reply_mode = getattr(config, 'reply_to_mode', 'first') or 'first'
-        self._reply_to_mode = "off" if configured_reply_mode == "off" else "first"
+        self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
         self._disable_link_previews: bool = self._coerce_bool_extra("disable_link_previews", False)
         # --- split replies: agent writes standalone --- lines to separate bubbles
         split_cfg = extra.get("split_replies", {})
@@ -3509,8 +3508,11 @@ class TelegramAdapter(BasePlatformAdapter):
         """Whether this chunk (0 = first) should reply-thread to ``reply_to``, per reply_to_mode."""
         if not reply_to:
             return False
-        if self._reply_to_mode == "off":
+        mode = self._reply_to_mode
+        if mode == "off":
             return False
+        if mode == "all":
+            return True
         return chunk_index == 0  # "first" (default)
 
     @staticmethod
