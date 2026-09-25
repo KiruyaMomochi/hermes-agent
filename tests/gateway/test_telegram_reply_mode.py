@@ -3,6 +3,7 @@
 Covers the threading behavior control for multi-chunk replies:
 - "off": Never thread replies to original message
 - "first": Only first chunk threads (default)
+- "all": All chunks thread to original message
 """
 import os
 from unittest.mock import MagicMock, AsyncMock, patch
@@ -33,9 +34,9 @@ class TestReplyToModeConfig:
         adapter = adapter_factory(reply_to_mode="off")
         assert adapter._reply_to_mode == "off"
 
-    def test_legacy_all_mode_normalizes_to_first(self, adapter_factory):
+    def test_all_mode(self, adapter_factory):
         adapter = adapter_factory(reply_to_mode="all")
-        assert adapter._reply_to_mode == "first"
+        assert adapter._reply_to_mode == "all"
 
 
 class TestShouldThreadReply:
@@ -51,6 +52,12 @@ class TestShouldThreadReply:
         assert adapter._should_thread_reply("msg-123", 0) is False
         assert adapter._should_thread_reply("msg-123", 1) is False
         assert adapter._should_thread_reply("msg-123", 5) is False
+
+    def test_all_mode_threads_every_chunk(self, adapter_factory):
+        adapter = adapter_factory(reply_to_mode="all")
+        assert adapter._should_thread_reply("msg-123", 0) is True
+        assert adapter._should_thread_reply("msg-123", 1) is True
+        assert adapter._should_thread_reply("msg-123", 5) is True
 
 
 class TestSendWithReplyToMode:
@@ -108,6 +115,12 @@ class TestEnvVarOverride:
             _apply_env_overrides(config)
         assert config.platforms[Platform.TELEGRAM].reply_to_mode == "off"
 
+    def test_env_var_sets_all_mode(self):
+        config = self._make_config()
+        with patch.dict(os.environ, {"TELEGRAM_REPLY_TO_MODE": "all"}, clear=False):
+            _apply_env_overrides(config)
+        assert config.platforms[Platform.TELEGRAM].reply_to_mode == "all"
+
 class TestTelegramYamlConfigLoading:
     """Tests for reply_to_mode loaded from config.yaml telegram section."""
 
@@ -135,14 +148,14 @@ class TestTelegramYamlConfigLoading:
         """telegram.reply_to_mode wins over telegram.extra.reply_to_mode."""
         hermes_home = self._write_config(
             tmp_path,
-            "telegram:\n  reply_to_mode: first\n  extra:\n    reply_to_mode: \"off\"\n",
+            "telegram:\n  reply_to_mode: all\n  extra:\n    reply_to_mode: \"off\"\n",
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("TELEGRAM_REPLY_TO_MODE", raising=False)
 
         load_gateway_config()
 
-        assert os.environ.get("TELEGRAM_REPLY_TO_MODE") == "first"
+        assert os.environ.get("TELEGRAM_REPLY_TO_MODE") == "all"
 
 
 class TestDMTopicFallbackReplyToMode:
