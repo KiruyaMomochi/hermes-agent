@@ -90,6 +90,19 @@ class TestSendWithReplyToMode:
         assert calls[1].kwargs.get("reply_to_message_id") is None
         assert calls[2].kwargs.get("reply_to_message_id") is None
 
+    @pytest.mark.asyncio
+    async def test_all_mode_threads_every_chunk(self, adapter_factory):
+        adapter = adapter_factory(reply_to_mode="all")
+        adapter._bot = MagicMock()
+        adapter._bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+        adapter.truncate_message = lambda content, max_len, **kw: ["chunk1", "chunk2", "chunk3"]
+
+        await adapter.send("12345", "test content", reply_to="999")
+
+        calls = adapter._bot.send_message.call_args_list
+        assert len(calls) == 3
+        assert all(call.kwargs.get("reply_to_message_id") == 999 for call in calls)
+
 
 class TestConfigSerialization:
     """Tests for reply_to_mode serialization."""
