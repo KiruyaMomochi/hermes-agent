@@ -1147,6 +1147,8 @@ class TelegramAdapter(BasePlatformAdapter):
     @classmethod
     def _reply_to_message_id_for_send(
         cls, reply_to: Optional[str], metadata: Optional[Dict[str, Any]] = None, reply_to_mode: Optional[str] = None) -> Optional[int]:
+        if reply_to_mode == "off":
+            return None
         if reply_to:
             return int(reply_to)
         if cls._dm_topic_fallback(metadata) and reply_to_mode != "off":
@@ -1203,7 +1205,8 @@ class TelegramAdapter(BasePlatformAdapter):
         """Routing kwargs for ``sendMessageDraft`` / ``sendRichMessageDraft`` (integer
         ``message_thread_id`` for DM topics — Telegram rejects the raw string ``thread_id``)."""
         kwargs = self._thread_kwargs_for_send(
-            chat_id, self._metadata_thread_id(metadata), metadata, reply_to_message_id=self._reply_to_message_id_for_send(None, metadata),
+            chat_id, self._metadata_thread_id(metadata), metadata,
+            reply_to_message_id=self._reply_to_message_id_for_send(None, metadata, reply_to_mode=self._reply_to_mode),
             reply_to_mode=getattr(self, "_reply_to_mode", None))
         return {k: v for k, v in kwargs.items() if v is not None}
 
@@ -1561,6 +1564,9 @@ class TelegramAdapter(BasePlatformAdapter):
         else:
             should_thread = self._should_thread_reply(reply_to_source, index)
         reply_to_id = int(reply_to_source) if should_thread and reply_to_source else None
+        self._trace_send(
+            "reply_routing", mode=self._reply_to_mode, chunk=index,
+            dm_topic=private_dm_topic_send, thread=bool(thread_id), anchor=reply_to_id is not None)
         return private_dm_topic_send, dm_topic_reply_to_off, reply_to_id
 
     def _compute_single_send_routing(
@@ -4252,8 +4258,9 @@ class TelegramAdapter(BasePlatformAdapter):
         prev_id = message_id
         thread_id = self._metadata_thread_id(metadata)
         for chunk in chunks[1:]:
-            reply_to_id = int(prev_id) if prev_id else None
-            thread_kwargs = self._thread_kwargs_for_send(chat_id, thread_id, metadata, reply_to_message_id=reply_to_id)
+            reply_to_id = int(prev_id) if prev_id and self._reply_to_mode != "off" else None
+            thread_kwargs = self._thread_kwargs_for_send(
+                chat_id, thread_id, metadata, reply_to_message_id=reply_to_id, reply_to_mode=self._reply_to_mode)
             sent_msg = await self._send_overflow_continuation(chat_id, chunk, reply_to_id, thread_kwargs, thread_id, metadata, finalize)
             if sent_msg is None:
                 # Partial delivery: do NOT report success — the consumer would treat it as final delivery.
