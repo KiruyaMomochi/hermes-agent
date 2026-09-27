@@ -624,6 +624,8 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         self._rich_messages_enabled: bool = self._coerce_bool_extra("rich_messages", False)
         # CJK stays on legacy MarkdownV2 by default (Desktop/macOS garble, #47653); opt-in for unaffected clients.
         self._allow_cjk_rich_messages: bool = self._coerce_bool_extra("allow_cjk_rich_messages", False)
+        self._disable_cjk_rich_guard: bool = self._coerce_bool_extra("disable_cjk_rich_guard", False)
+        self._trace_sends: bool = self._coerce_bool_extra("trace_sends", False)
         self._rich_drafts_enabled: bool = self._coerce_bool_extra("rich_drafts", False)
         self._rich_send_disabled = self._rich_draft_disabled = False  # latched after a capability failure
         # Transient sendChatAction failures recur on every keep-typing tick; back off per chat.
@@ -1375,7 +1377,8 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
             content and content.strip()
             and not self._has_telegram_desktop_details_math_crash_shape(content)
             and (
-                getattr(self, "_allow_cjk_rich_messages", False)
+                getattr(self, "_disable_cjk_rich_guard", False)
+                or getattr(self, "_allow_cjk_rich_messages", False)
                 or not self._has_telegram_desktop_cjk_rich_garble_shape(content)
             )
             and self._content_fits_rich_limits(content)
