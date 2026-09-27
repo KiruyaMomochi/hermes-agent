@@ -196,12 +196,12 @@ class TestDMTopicFallbackReplyToMode:
         assert result is None
 
 
-    def test_explicit_reply_to_overrides_mode(self):
-        """Explicit reply_to param always wins, regardless of mode."""
+    def test_explicit_reply_to_does_not_override_off(self):
+        """Media and other explicit reply_to callers must respect the visual opt-out."""
         result = TelegramAdapter._reply_to_message_id_for_send(
             "999", self.DM_TOPIC_METADATA, reply_to_mode="off",
         )
-        assert result == 999
+        assert result is None
 
     # -- _thread_kwargs_for_send classmethod --
 
@@ -228,6 +228,7 @@ class TestDMTopicFallbackReplyToMode:
 
         call = adapter._bot.send_message.call_args_list[0]
         assert call.kwargs.get("reply_to_message_id") is None
+        assert call.kwargs.get("message_thread_id") == 42
 
 
 class TestDMTopicSyntheticSendRouting:
