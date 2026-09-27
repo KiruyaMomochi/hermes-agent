@@ -620,6 +620,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._rich_messages_enabled: bool = self._coerce_bool_extra("rich_messages", False)
         # CJK stays on legacy MarkdownV2 by default (Desktop/macOS garble, #47653); opt-in for unaffected clients.
         self._allow_cjk_rich_messages: bool = self._coerce_bool_extra("allow_cjk_rich_messages", False)
+        self._disable_cjk_rich_guard: bool = self._coerce_bool_extra("disable_cjk_rich_guard", False)
+        self._trace_sends: bool = self._coerce_bool_extra("trace_sends", False)
         self._rich_drafts_enabled: bool = self._coerce_bool_extra("rich_drafts", False)
         self._rich_send_disabled = self._rich_draft_disabled = False  # latched after a capability failure
         # Transient sendChatAction failures recur on every keep-typing tick; back off per chat.
@@ -1465,14 +1467,16 @@ class TelegramAdapter(BasePlatformAdapter):
         """Whether rich delivery is allowed (``rich_messages`` opt-in)."""
         return bool(getattr(self, "_rich_messages_enabled", True))
 
-    def _rich_content_ok(self, content: str) -> bool:
+    def _rich_content_ok(self, content: str, *, disable_cjk_guard: bool = False) -> bool:
         """Shape checks shared by rich sends and rich drafts (non-blank, no Desktop crash/garble
         shapes, under the cap, async-capable bot)."""
         return bool(
             content and content.strip()
             and not self._has_telegram_desktop_details_math_crash_shape(content)
             and (
-                getattr(self, "_allow_cjk_rich_messages", False)
+                disable_cjk_guard
+                or getattr(self, "_disable_cjk_rich_guard", False)
+                or getattr(self, "_allow_cjk_rich_messages", False)
                 or not self._has_telegram_desktop_cjk_rich_garble_shape(content)
             )
             and self._content_fits_rich_limits(content)
@@ -1485,7 +1489,7 @@ class TelegramAdapter(BasePlatformAdapter):
             and not getattr(self, "_rich_send_disabled", False)
             and content and content.strip()
             and self._needs_rich_rendering(content)
-            and self._rich_content_ok(content))
+            and self._rich_content_ok(content, disable_cjk_guard=getattr(self, "_disable_cjk_rich_guard", False)))
 
     def _should_attempt_rich(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
         return bool(not (metadata or {}).get("expect_edits") and self._rich_eligible(content))
@@ -1689,7 +1693,7 @@ class TelegramAdapter(BasePlatformAdapter):
             and getattr(self, "_rich_drafts_enabled", False)
             and not getattr(self, "_rich_send_disabled", False)
             and not getattr(self, "_rich_draft_disabled", False)
-            and self._rich_content_ok(content))
+            and self._rich_content_ok(content, disable_cjk_guard=getattr(self, "_disable_cjk_rich_guard", False)))
 
     async def _try_send_rich_draft(self, chat_id: str, draft_id: int, content: str, metadata: Optional[Dict[str, Any]]) -> bool:
         """Emit one ``sendRichMessageDraft`` frame; True on success. Frames are ephemeral, so any failure
