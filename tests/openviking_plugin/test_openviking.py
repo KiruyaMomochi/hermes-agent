@@ -747,6 +747,9 @@ class TestOpenVikingAutoRecallPrefetch:
             "OPENVIKING_RECALL_PREFER_ABSTRACT",
             "OPENVIKING_RECALL_RESOURCES",
             "OPENVIKING_PROFILE_TOKEN_BUDGET",
+            "OPENVIKING_SESSION_START_PROFILE",
+            "OPENVIKING_SESSION_START_MEMORIES",
+            "OPENVIKING_AVAILABLE_MEMORIES_LIMIT",
             "OPENVIKING_API_KEY",
         ):
             monkeypatch.delenv(key, raising=False)
@@ -754,6 +757,8 @@ class TestOpenVikingAutoRecallPrefetch:
         monkeypatch.setenv("OPENVIKING_ACCOUNT", "acct")
         monkeypatch.setenv("OPENVIKING_USER", "user")
         monkeypatch.setenv("OPENVIKING_AGENT", peer)
+        monkeypatch.setenv("OPENVIKING_SESSION_START_PROFILE", "true")
+        monkeypatch.setenv("OPENVIKING_SESSION_START_MEMORIES", "true")
 
         provider = OpenVikingMemoryProvider()
         try:
