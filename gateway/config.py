@@ -467,7 +467,14 @@ class PlatformConfig:
             token=data.get("token"),
             api_key=data.get("api_key"),
             home_channel=HomeChannel.from_dict(home) if isinstance(home, dict) else None,
-            reply_to_mode=data.get("reply_to_mode", "first"),
+            # Plugin YAML bridges keep profile-local values in ``extra`` when a
+            # multiplexed scope cannot write the process environment.  Honour
+            # that fallback just like the other typed settings.
+            reply_to_mode=(
+                toplevel_or_extra("reply_to_mode")
+                if toplevel_or_extra("reply_to_mode") is not None
+                else "first"
+            ),
             gateway_restart_notification=_coerce_bool(toplevel_or_extra("gateway_restart_notification"), True),
             typing_indicator=_coerce_bool(toplevel_or_extra("typing_indicator"), True),
             typing_status_text=toplevel_or_extra("typing_status_text"),  # string passthrough, no coercion

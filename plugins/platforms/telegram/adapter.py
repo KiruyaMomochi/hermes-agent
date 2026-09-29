@@ -7431,6 +7431,10 @@ def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:
     _telegram_extra = telegram_cfg.get("extra") if isinstance(telegram_cfg.get("extra"), dict) else {}
     _telegram_rtm = telegram_cfg["reply_to_mode"] if "reply_to_mode" in telegram_cfg else _telegram_extra.get("reply_to_mode")
     if _telegram_rtm is not None:
+        # The env bridge is skipped for a multiplexed secondary profile.  Keep the
+        # value in PlatformConfig.extra as the profile-local source of truth so the
+        # adapter factory does not fall back to its ``first`` default there.
+        extras.setdefault("reply_to_mode", "off" if _telegram_rtm is False else str(_telegram_rtm).lower())
         _set_env("TELEGRAM_REPLY_TO_MODE", "off" if _telegram_rtm is False else str(_telegram_rtm).lower())
     _bridge_gate("allow_from", "TELEGRAM_ALLOWED_USERS", telegram_cfg.get("allow_from"))
     _bridge_gate(

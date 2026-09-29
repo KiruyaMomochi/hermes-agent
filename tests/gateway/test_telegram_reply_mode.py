@@ -170,6 +170,28 @@ class TestTelegramYamlConfigLoading:
 
         assert os.environ.get("TELEGRAM_REPLY_TO_MODE") == "all"
 
+    def test_multiplexed_runner_keeps_reply_mode_in_platform_extra(self, tmp_path, monkeypatch):
+        """The scoped startup reload must not depend on a process-global env bridge."""
+        from agent import secret_scope
+        from gateway import run as run_mod
+
+        hermes_home = self._write_config(
+            tmp_path,
+            "gateway:\n  multiplex_profiles: true\n"
+            "telegram:\n  enabled: true\n  token: test-token\n  reply_to_mode: \"off\"\n",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("TELEGRAM_REPLY_TO_MODE", raising=False)
+        secret_scope.set_multiplex_active(False)
+        try:
+            config = run_mod.load_gateway_config_for_runner()
+        finally:
+            secret_scope.set_multiplex_active(False)
+
+        telegram = config.platforms[Platform.TELEGRAM]
+        assert telegram.reply_to_mode == "off"
+        assert telegram.extra["reply_to_mode"] == "off"
+
 
 class TestDMTopicFallbackReplyToMode:
     """Tests for reply_to_mode enforcement on DM topic fallback paths.
