@@ -40,6 +40,33 @@ def test_compact_user_timestamps_keep_sidecar_only_assistant_turn():
     assert replay[2]["content"].endswith(" later")
 
 
+def test_compact_user_timestamps_keep_leading_memory_context_sidecar():
+    from agent.turn_context import compose_user_api_content
+    from gateway.run import _local_datetime
+    from hermes_time import get_timezone
+
+    tz = get_timezone()
+    first_dt = _local_datetime(STAMP, tz=tz)
+    first_rendered = f"{inbound_timestamp_prefix(STAMP, tz=tz)} first"
+    later_rendered = f"{inbound_timestamp_prefix(STAMP + 120, previous=first_dt, tz=tz)} later"
+    first_sidecar = compose_user_api_content(first_rendered, "slept at 4:30", POLICY)
+    later_sidecar = compose_user_api_content(later_rendered, "ssh key hint", "")
+
+    replay, _ = _build_gateway_agent_history(
+        [
+            {"role": "user", "content": "first", "api_content": first_sidecar, "timestamp": STAMP},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "later", "api_content": later_sidecar, "timestamp": STAMP + 120},
+        ],
+        inject_timestamps=True,
+    )
+
+    assert replay[0]["content"] == first_rendered
+    assert replay[0]["api_content"] == first_sidecar
+    assert replay[2]["content"] == later_rendered
+    assert replay[2]["api_content"] == later_sidecar
+
+
 @pytest.mark.parametrize("timestamps", [False, True])
 @pytest.mark.parametrize("embedded", [False, True])
 @pytest.mark.parametrize("real_text", ["", "please check the result"])

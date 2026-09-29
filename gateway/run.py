@@ -1309,6 +1309,8 @@ def _build_gateway_agent_history(
             replay_timestamp = msg.get("timestamp")
             # Clean before rendering: a timestamp prefix hides recovery notes
             # from the startswith-based stripper. Retain an embedded original time.
+            clean_body = content
+            body = content
             if role == "user":
                 if isinstance(content, str):
                     body, embedded_timestamp = _strip_msg_ts(content, tz=_msg_tz)
@@ -1329,16 +1331,27 @@ def _build_gateway_agent_history(
                 # Preserve only a sidecar matching the complete rendered message,
                 # optionally followed by the normal context separator. Cleanup
                 # above already invalidated sidecars containing stripped content.
-                sidecar = entry.get("api_content") or msg.get("api_content")
-                if sidecar and rendered != content:
+                sidecar = entry.get("api_content") or (
+                    msg.get("api_content") if clean_body == body else None
+                )
+                if sidecar:
+                    memory_prefix = ""
+                    sidecar_rest = sidecar
+                    if sidecar.startswith("<memory-context>\n"):
+                        close_marker = "\n</memory-context>\n\n"
+                        close_idx = sidecar.find(close_marker)
+                        if close_idx != -1:
+                            split_at = close_idx + len(close_marker)
+                            memory_prefix = sidecar[:split_at]
+                            sidecar_rest = sidecar[split_at:]
                     # A sidecar may have been produced with the old verbose
                     # prefix. Compare its prefix-stripped body so changing the
                     # display format does not discard API-only context.
-                    sidecar_body, _ = _strip_msg_ts(sidecar, tz=_msg_tz)
-                    if sidecar == rendered or sidecar.startswith(rendered + "\n\n"):
+                    sidecar_body, _ = _strip_msg_ts(sidecar_rest, tz=_msg_tz)
+                    if sidecar_rest == rendered or sidecar_rest.startswith(rendered + "\n\n"):
                         pass
                     elif sidecar_body == content or sidecar_body.startswith(content + "\n\n"):
-                        sidecar = rendered + sidecar_body[len(content):]
+                        sidecar = memory_prefix + rendered + sidecar_body[len(content):]
                     else:
                         sidecar = None
                 if sidecar:

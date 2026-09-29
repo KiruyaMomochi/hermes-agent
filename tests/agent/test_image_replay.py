@@ -124,7 +124,7 @@ def test_replay_window_skips_untrusted_bytes_and_typed_markers(tmp_path):
 
 
 def test_replay_keeps_part_order_and_appended_turn_context(tmp_path):
-    """Turn-time memory/hook context lands after the image (``_append_multimodal_context``); the
+    """Turn-time memory precedes the request and hook context follows the image; the
     rebuilt row still carries the image in place (the reload scrubs the memory fence itself)."""
     from agent.turn_context import _append_multimodal_context
 
@@ -134,7 +134,9 @@ def test_replay_keeps_part_order_and_appended_turn_context(tmp_path):
     assert live["content"][-1]["type"] == "text"
 
     rebuilt = _rebuilt_request(tmp_path, [live])[0]["content"]
-    assert rebuilt[:2] == live["content"][:2]
+    # Recall precedes the live request and is scrubbed on reload, not replayed as user speech.
+    assert "recalled memory" not in str(rebuilt)
+    assert rebuilt[:2] == live["content"][1:3]
     assert rebuilt[2]["type"] == "text" and rebuilt[2]["text"].endswith("plugin hook context")
 
 
