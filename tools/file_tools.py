@@ -1309,7 +1309,10 @@ SEARCH_FILES_SCHEMA = {
 
 def _handle_read_file(args, **kw):
     tid = kw.get("task_id") or "default"
-    return read_file_tool(path=args.get("path", ""), offset=args.get("offset", 1), limit=args.get("limit", DEFAULT_READ_LIMIT), task_id=tid)
+    # Models trained on other harnesses emit ``file_path``; without this the empty
+    # path resolves to cwd and the error never names the real mistake.
+    path = args.get("path") or args.get("file_path") or ""
+    return read_file_tool(path=path, offset=args.get("offset", 1), limit=args.get("limit", DEFAULT_READ_LIMIT), task_id=tid)
 
 
 def _handle_write_file(args, **kw):
