@@ -606,20 +606,21 @@ class TestOpenVikingRead:
 
 
 class TestOpenVikingAutoRecallPrefetch:
-    def test_prefetch_compacts_chatlog_prose_but_preserves_fenced_code(self):
+    def test_prefetch_projects_recall_without_transcript_or_metadata(self):
         uri = "viking://user/default/memories/events/2026/09/10/example.md"
         content = (
             "# Summary\n"
-            "First summary paragraph.\n\n\n"
+            "First summary paragraph.\n\n"
             "Second summary paragraph.\n"
             "# 2026-09-10 (Thursday) ChatLog:\n"
-            "**33**: First paragraph.\n\n\n"
-            "Second paragraph.\n\n"
+            "**33**: User transcript.\n"
+            "**hermes**: Assistant transcript.\n"
+            "# Evidence\n"
             "```python\n"
-            "first = 1\n\n\n"
-            "second = 2\n"
+            "**speaker**: preserved inside code\n"
             "```\n\n\n"
-            "After the fence.\n\n"
+            "**orphan**: remaining transcript row\n"
+            "Evidence preserved.\n\n"
             "<!-- MEMORY_FIELDS\n{}\n-->"
         )
         client = FakeVikingClient({
@@ -638,11 +639,41 @@ class TestOpenVikingAutoRecallPrefetch:
         )
 
         recalled = entries[0]
-        assert "First summary paragraph.\n  \n  \n  Second summary paragraph." in recalled
-        assert "**33**: First paragraph.\n  Second paragraph." in recalled
-        assert "first = 1\n  \n  \n  second = 2" in recalled
-        assert "```\n  After the fence." in recalled
-        assert "After the fence.\n  <!-- MEMORY_FIELDS" in recalled
+        assert recalled.startswith('<retrieved-memory provider="openviking" category="events">')
+        assert f"<source-uri>{uri}</source-uri>" in recalled
+        assert "# Summary" in recalled
+        assert "First summary paragraph." in recalled
+        assert "# Evidence" in recalled
+        assert "Evidence preserved." in recalled
+        assert "**speaker**: preserved inside code" in recalled
+        assert "ChatLog" not in recalled
+        assert "User transcript" not in recalled
+        assert "Assistant transcript" not in recalled
+        assert "remaining transcript row" not in recalled
+        assert "MEMORY_FIELDS" not in recalled
+        assert content.endswith("<!-- MEMORY_FIELDS\n{}\n-->")
+
+    def test_prefetch_drops_undated_chatlog_heading(self):
+        uri = "viking://user/default/memories/events/example.md"
+        content = "# Summary\nKeep this.\n\nChatLog:\n**user**: drop this\n"
+        client = FakeVikingClient({
+            ("/api/v1/content/read", (("uri", uri),)): {"result": {"content": content}},
+        })
+        provider = OpenVikingMemoryProvider()
+
+        entries = provider._build_prefetch_entries(
+            cast(Any, client),
+            [{"uri": uri, "score": 0.9, "level": 2, "category": "events", "abstract": "ignored"}],
+            prefer_abstract=False,
+            max_injected_chars=10_000,
+            deadline=time.monotonic() + 10,
+            request_timeout=1,
+            full_read_limit=1,
+        )
+
+        assert "Keep this." in entries[0]
+        assert "ChatLog" not in entries[0]
+        assert "drop this" not in entries[0]
 
     @pytest.mark.parametrize("peer", ["", "hermes"])
     def test_prefetch_e2e_sends_limit_and_reads_l2_content(self, monkeypatch, peer):
