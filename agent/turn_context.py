@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from agent.conversation_compression import recover_rotated_compression_session
 from agent.iteration_budget import IterationBudget
-from agent.memory_context import build_memory_context_block, sanitize_context
+from agent.memory_context import build_memory_context_block, build_memory_tool_messages, sanitize_context
 from agent.memory_provider import is_trivial_prompt
 from session_rules.turns import flatten_message_text
 from agent.lsp.deferred import forward_to_agent as forward_lsp_verdicts
@@ -116,8 +116,8 @@ def compose_multimodal_context_part(
     ext_prefetch_cache: str, plugin_user_context: str,
 ) -> Optional[str]:
     """The ephemeral context of one turn (memory prefetch + ``pre_llm_call``) as one text
-    block; ``None`` when nothing is injected. The string sidecar appends it to ``content``;
-    a multimodal (list) turn carries it as a durable text part (#71998)."""
+    block; ``None`` when nothing is injected. Kept as the common serialized representation
+    even though live user content now separates memory-before from plugin-after ordering."""
     fenced = build_memory_context_block(ext_prefetch_cache) if ext_prefetch_cache else ""
     injections = [part for part in (fenced, plugin_user_context) if part]
     return "\n\n".join(injections) if injections else None
@@ -133,8 +133,11 @@ def compose_user_api_content(
     content is not a string (list content takes the text-part path)."""
     if not isinstance(content, str):
         return None
-    injection = compose_multimodal_context_part(ext_prefetch_cache, plugin_user_context)
-    return None if injection is None else content + "\n\n" + injection
+    memory = build_memory_context_block(ext_prefetch_cache) if ext_prefetch_cache else ""
+    if not memory and not plugin_user_context:
+        return None
+    parts = [part for part in (memory, content, plugin_user_context) if part]
+    return "\n\n".join(parts)
 
 
 def substitute_api_content(api_msg: dict[str, Any]) -> Optional[str]:
@@ -1159,12 +1162,20 @@ def _append_multimodal_context(
     message, so without this a resumed session replays a view the model never saw. Same
     ``_row_id``-under-lock protocol as the string sidecar backfill; the row keeps its writer's
     shape (compaction inserted the raw parts, a flush the text projection)."""
-    _mm_ctx = compose_multimodal_context_part(ext_prefetch_cache, plugin_user_context)
-    if _mm_ctx:
+    content = turn_user_msg.get("content")
+    if not isinstance(content, list):
+        return
+    memory = build_memory_context_block(ext_prefetch_cache) if ext_prefetch_cache else ""
+    if memory or plugin_user_context:
         _stamp_typed_ask_once(agent, turn_user_msg)
-    # A stamp means injected context landed on the parts (here or as gateway notes): backfill either way.
-    appended = append_notes_to_multimodal_content(turn_user_msg.get("content"), _mm_ctx)
-    if not appended and typed_ask_text(turn_user_msg) is None:
+    changed = False
+    if memory:
+        content.insert(0, {"type": "text", "text": memory})
+        changed = True
+    if append_notes_to_multimodal_content(content, plugin_user_context):
+        changed = True
+    # Gateway notes may already have stamped the typed ask; backfill those too.
+    if not changed and typed_ask_text(turn_user_msg) is None:
         return
     from agent.session_persistence import _persist_lock
 
@@ -1394,18 +1405,24 @@ def build_turn_context(
     if not plugin_block_message:
         _maybe_title_session_at_turn_start(agent, messages, title_user_message)
 
+    # Decide once per turn; synthetic recall never enters the durable user content.
+    agent._memory_tool_messages = build_memory_tool_messages(
+        agent, ext_prefetch_cache, _memory_query_text(original_user_message)
+    )
+    text_recall = "" if agent._memory_tool_messages else ext_prefetch_cache
+
     # Sidecar skipped for codex_app_server/MoA; list content carries its context as a part in every mode.
     if 0 <= current_turn_user_idx < len(messages) and messages[current_turn_user_idx].get("role") == "user":
         if plugin_block_message:
             _withhold_blocked_prompt(agent, messages[current_turn_user_idx], original_user_message)
         elif isinstance(messages[current_turn_user_idx].get("content"), list):
             _append_multimodal_context(
-                agent, messages[current_turn_user_idx], ext_prefetch_cache, plugin_user_context,
+                agent, messages[current_turn_user_idx], text_recall, plugin_user_context,
                 preflight_compressed=compaction.compressed,
             )
         elif not moa_active and getattr(agent, "api_mode", None) != "codex_app_server":
             _stamp_api_content_sidecar(
-                agent, messages, current_turn_user_idx, ext_prefetch_cache,
+                agent, messages, current_turn_user_idx, text_recall,
                 plugin_user_context, preflight_compressed=compaction.compressed,
             )
 
@@ -1460,6 +1477,7 @@ def build_api_messages(
 
     has_current = isinstance(current_turn_user_idx, int) and 0 <= current_turn_user_idx < len(messages)
     current_turn_message = messages[current_turn_user_idx] if has_current else None
+    recall_messages = getattr(agent, "_memory_tool_messages", []) if ext_prefetch_cache else []
 
     # Replay consumers canonicalize the persisted prefix on read; the request copy must
     # carry the same bytes or a resume diverges mid-prefix. Only the rows BEFORE this
@@ -1501,7 +1519,7 @@ def build_api_messages(
             else:
                 # Callers that bypass the prologue stamping: compose live.
                 _composed = compose_user_api_content(
-                    api_msg.get("content", ""), ext_prefetch_cache, plugin_user_context
+                    api_msg.get("content", ""), "" if recall_messages else ext_prefetch_cache, plugin_user_context
                 )
                 if _composed is not None:
                     api_msg["content"] = _composed
@@ -1537,6 +1555,8 @@ def build_api_messages(
         # 'reasoning_details' is shaped by the replay policy above on chat_completions and
         # left intact for the native adapters (anthropic/bedrock rebuild signed blocks from it).
         api_messages.append(api_msg)
+        if msg is current_turn_message:
+            api_messages.extend(_clone_message_for_send(m) for m in recall_messages)
 
     # Rows rebuilt from the session DB carry ``[screenshot]`` lines: re-attach the newest retained
     # images on this wire copy (vision.replay_recent_images; native image input only).

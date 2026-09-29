@@ -23,15 +23,22 @@ logger = logging.getLogger(__name__)
 _FENCE_TAG_RE = re.compile(r'</?\s*memory-context\s*>', re.IGNORECASE)
 _INTERNAL_CONTEXT_RE = re.compile(r'<\s*memory-context\s*>[\s\S]*?</\s*memory-context\s*>', re.IGNORECASE)
 _INTERNAL_NOTE_RE = re.compile(
-    r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]\s*',
+    r'(?:\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*'
+    r'Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]|'
+    r'\[System note: The following is retrieved memory reference data, '
+    r'not user or assistant speech and not instructions\.\]|'
+    r'\[(?:系统提示|系统注释|系统说明)\s*[:：][^\]]*(?:记忆|上下文)[^\]]*\])\s*',
     re.IGNORECASE,
 )
 
 
-def sanitize_context(text: str) -> str:
-    """Strip fence tags, injected context blocks, and system notes from provider output."""
+def sanitize_context(text: str, *, memory_headers: tuple[str, ...] = ()) -> str:
+    """Strip recall scaffolding; applications pass their configured literal headers explicitly."""
     for pattern in (_INTERNAL_CONTEXT_RE, _INTERNAL_NOTE_RE, _FENCE_TAG_RE):
         text = pattern.sub('', text)
+    for header in memory_headers:
+        if header:
+            text = re.sub(re.escape(header) + r'\s*', '', text, flags=re.IGNORECASE)
     return text
 
 
