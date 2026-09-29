@@ -29,7 +29,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.turn_context import (
+    _append_multimodal_context,
     _memory_query_text,
+    build_api_messages,
     build_turn_context,
     compose_multimodal_context_part,
     compose_user_api_content,
@@ -45,15 +47,75 @@ class TestComposeUserApiContent:
     def test_none_when_nothing_to_inject(self):
         assert compose_user_api_content("hello", "", "") is None
 
+    def test_memory_precedes_user_and_plugin_remains_tail(self):
+        sidecar = compose_user_api_content("hello", "likes tea", "PLUGIN-CTX")
+        assert sidecar is not None
+        assert sidecar.startswith("<memory-context>\n")
+        assert sidecar.index("likes tea") < sidecar.index("hello") < sidecar.index("PLUGIN-CTX")
+
+    def test_memory_only_still_wraps_empty_user_content(self):
+        sidecar = compose_user_api_content("", "likes tea", "")
+        assert sidecar is not None
+        assert "likes tea" in sidecar
+
 
 class TestComposeMultimodalContextPart:
-    def test_is_the_string_sidecar_injection_tail(self):
-        """Both content shapes inject byte-identical context (#71998): the text part a list
-        turn carries is exactly what the string sidecar appends after ``content``."""
+    def test_serializes_memory_then_plugin_context(self):
         assert compose_multimodal_context_part("", "") is None
-        sidecar = compose_user_api_content("hello", "likes tea", "CTX")
         part = compose_multimodal_context_part("likes tea", "CTX")
-        assert sidecar == "hello\n\n" + part
+        assert part is not None
+        assert part.startswith("<memory-context>\n")
+        assert part.endswith("CTX")
+
+    def test_live_multimodal_order_is_memory_parts_then_plugin_tail(self):
+        agent = types.SimpleNamespace(_session_db=None, session_id="s1")
+        original = [
+            {"type": "text", "text": "hello"},
+            {"type": "image_url", "image_url": {"url": "data:img"}},
+        ]
+        message = {"content": list(original)}
+
+        _append_multimodal_context(
+            agent, message, "likes tea", "PLUGIN-CTX", preflight_compressed=False
+        )
+
+        assert message["content"][0]["text"].startswith("<memory-context>\n")
+        assert message["content"][1:-1] == original
+        assert message["content"][-1] == {"type": "text", "text": "PLUGIN-CTX"}
+
+
+class TestRecallDoesNotChangeSystemMessage:
+    class _Agent:
+        _current_turn_timestamp = 1.0
+        ephemeral_system_prompt = ""
+
+        @staticmethod
+        def _copy_reasoning_content_for_api(_source, _target):
+            pass
+
+        @staticmethod
+        def _should_sanitize_tool_calls():
+            return False
+
+    def test_system_message_is_identical_with_and_without_recall(self):
+        messages = [{"role": "user", "content": "hello"}]
+        kwargs = dict(
+            current_turn_user_idx=0,
+            plugin_user_context="",
+            moa_config=None,
+            active_system_prompt="SYSTEM",
+        )
+
+        without_recall, without_system = build_api_messages(
+            self._Agent(), messages, ext_prefetch_cache="", **kwargs
+        )
+        with_recall, with_system = build_api_messages(
+            self._Agent(), messages, ext_prefetch_cache="likes tea", **kwargs
+        )
+
+        assert with_system == without_system == "SYSTEM"
+        assert with_recall[0] == without_recall[0] == {"role": "system", "content": "SYSTEM"}
+        assert with_recall[1]["content"] != without_recall[1]["content"]
 
 
 class TestMemoryQueryText:
