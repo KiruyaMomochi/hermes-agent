@@ -35,6 +35,22 @@ class TestReadFileHandler:
         assert mock_ops.read_file.call_args.args[2] == schema_default
 
     @patch("tools.file_tools._get_file_ops")
+    def test_file_path_alias_reads_same_file_as_path(self, mock_get):
+        from tools.file_tools import _handle_read_file
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.content = "x"
+        result_obj.to_dict.return_value = {"content": "x", "total_lines": 1}
+        mock_ops.read_file.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        _handle_read_file({"path": "/tmp/a.txt"}, task_id="t-alias")
+        via_path = mock_ops.read_file.call_args.args[0]
+        _handle_read_file({"file_path": "/tmp/a.txt"}, task_id="t-alias")
+        via_alias = mock_ops.read_file.call_args.args[0]
+        assert via_alias == via_path
+
+    @patch("tools.file_tools._get_file_ops")
     def test_exception_returns_error_json(self, mock_get):
         mock_get.side_effect = RuntimeError("terminal not available")
 
