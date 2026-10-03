@@ -979,8 +979,8 @@ def _append_multimodal_context(
     A user row another writer materialized BEFORE the prologue (in-place preflight compaction,
     a close/early flush that raced it) is updated in place: the crash persist marker-skips that
     message, so without this a resumed session replays a view the model never saw. Same
-    ``_row_id``-under-lock protocol as the string sidecar backfill; the row keeps its writer's
-    shape (compaction inserted the raw parts, a flush the text projection)."""
+    ``_row_id``-under-lock protocol as the string sidecar backfill; the row-addressed
+    writer updates the projection and image references together."""
     content = turn_user_msg.get("content")
     if not isinstance(content, list):
         return
@@ -993,17 +993,17 @@ def _append_multimodal_context(
         changed = True
     if not changed:
         return
-    from agent.session_persistence import _durable_content, _persist_lock
+    from agent.session_persistence import _persist_lock
 
     with _persist_lock(agent):
         _row_id = turn_user_msg.get("_row_id")
         _db = getattr(agent, "_session_db", None)
         if _db is None or not isinstance(_row_id, int):
             return
-        _in_place_compacted = preflight_compressed and bool(getattr(agent, "_last_compaction_in_place", False))
-        content = turn_user_msg["content"] if _in_place_compacted else _durable_content(turn_user_msg["content"])
+        # The row-addressed writer owns both the text projection and image sidecar.
+        # Passing the original parts retains their order even after an early flush.
         try:
-            _db.set_user_message_content(agent.session_id, _row_id, content)
+            _db.set_user_message_content(agent.session_id, _row_id, turn_user_msg["content"])
         except Exception:
             logger.warning("multimodal context backfill failed for session=%s", agent.session_id or "none", exc_info=True)
 

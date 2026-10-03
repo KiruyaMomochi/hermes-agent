@@ -4,10 +4,12 @@ replayed-user dedupe. Mixin bound via the MRO, built on SessionDB's _read_ctx/_e
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import logging
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.context_compressor import (
@@ -33,8 +35,8 @@ _INSERT_MESSAGE_SQL = """INSERT INTO messages (session_id, role, content, tool_c
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
                    codex_message_items, platform_message_id, observed, _compressed_summary, active, api_content, display_kind,
                    display_metadata, display_identity, message_uid, absorbed_message_uids, tool_call_uids,
-                   tool_call_uid)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+                   tool_call_uid, image_refs)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 # Every column this module knows how to read: the ones it writes plus the three SQLite/compaction
 # owns. `_row_to_message_dict` drops raw bytes ONLY outside this set — a schema column keeps its
 # key (and its typed decoder) even when a row holds a BLOB, so no reader ever loses msg["content"].
@@ -72,6 +74,49 @@ _SHADOWED_CHECKPOINT_ROWS_SQL = ("SELECT id, codex_reasoning_items FROM messages
     "AND role = 'assistant' AND id < ? AND codex_reasoning_items LIKE '%\"compaction\"%'")
 _SET_CODEX_REASONING_SQL = "UPDATE messages SET codex_reasoning_items = ? WHERE id = ?"
 _INVALID = object()  # _json_or sentinel where the fallback must be distinguishable from JSON null
+
+
+def _restore_image_parts(raw: str, db_path: str) -> list[dict]:
+    """Decode a retained image sidecar, failing closed when a snapshot is gone or damaged."""
+    parts = _json_or(raw, [], "Invalid retained image references")
+    if not isinstance(parts, list):
+        return [{"type": "text", "text": "[image unavailable]"}]
+    restored = []
+    missing = False
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text":
+            restored.append({"type": "text", "text": str(part.get("text", ""))})
+        elif part.get("type") == "image_url":
+            digest = part.get("sha256")
+            try:
+                if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                    raise ValueError("invalid image digest")
+                image = (Path(db_path).parent / "cache" / "session_images" / digest).read_bytes()
+                if hashlib.sha256(image).hexdigest() != digest:
+                    raise ValueError("image snapshot hash mismatch")
+                mime = part.get("mime") if part.get("mime") in {"image/png", "image/jpeg", "image/webp", "image/gif"} else "image/png"
+                url = f"data:{mime};base64,{base64.b64encode(image).decode('ascii')}"
+                restored.append({"type": "image_url", "image_url": {"url": url}})
+            except (OSError, ValueError):
+                missing = True
+                restored.append({"type": "text", "text": "[image unavailable]"})
+        elif part.get("type") == "image_ref":
+            url = part.get("url")
+            if isinstance(url, str) and url.startswith(("http://", "https://")):
+                restored.append({"type": "image_url", "image_url": {"url": url}})
+            else:
+                missing = True
+                restored.append({"type": "text", "text": "[image unavailable]"})
+        elif part.get("type") == "image_unavailable":
+            missing = True
+            restored.append({"type": "text", "text": "[image unavailable]"})
+    if missing:
+        for part in restored:
+            if part.get("type") == "text":
+                part["text"] = re.sub(r"you can see it natively now", "image unavailable", part["text"], flags=re.I)
+    return restored
 
 
 def _coerce_timestamp(value: Any, default: float) -> float:
@@ -262,7 +307,16 @@ class SessionMessagesMixin:
         ``message_id`` (yuanbao's message-dict convention)."""
         _str_or_none = lambda v: _scrub_surrogates(v) if isinstance(v, str) else None  # noqa: E731
         _reasoning = lambda key: msg.get(key) if keep_reasoning else None  # noqa: E731
-        encoded_content = self._encode_content(msg.get("content"))
+        content = msg.get("content")
+        if isinstance(content, list):
+            from agent.session_persistence import _durable_content, _durable_image_parts
+            # Direct inserts and compaction/rewrite copies share this writer.  The
+            # current content is authoritative, so regenerate the sidecar instead
+            # of allowing stale metadata to resurrect old captions or images.
+            msg["image_refs"] = _durable_image_parts(content, self.db_path)
+            if msg.get("image_refs"):
+                content = _durable_content(content)
+        encoded_content = self._encode_content(content)
         encoded_tool_calls = json.dumps(tool_calls) if tool_calls else None
         encoded_tool_name = _scrub_surrogates(msg.get("tool_name"))
         display_metadata = self._encode_display_metadata(msg.get("display_metadata"))
@@ -283,7 +337,7 @@ class SessionMessagesMixin:
             _str_or_none(msg.get("api_content")), _str_or_none(msg.get("display_kind")),
             display_metadata, self._display_identity(self._display_dedupe_key(identity_row)),
             message_uid_or_none(msg), _absorbed_uids_json(msg),
-            _tool_call_uids_json(msg), _tool_call_uid_or_none(msg))
+            _tool_call_uids_json(msg), _tool_call_uid_or_none(msg), _str_or_none(msg.get("image_refs")))
 
     @staticmethod
     def _stamp_tool_call_uids(msg: Dict[str, Any], tool_calls: Any, batch_index: Dict[str, str]) -> None:
@@ -347,6 +401,8 @@ class SessionMessagesMixin:
         _restore_identity_columns(row, msg)
         if row["api_content"] is not None:
             msg["api_content"] = row["api_content"]
+        if row["image_refs"] is not None:
+            msg["image_refs"] = row["image_refs"]
         if row["display_kind"] is not None:
             msg["display_kind"] = row["display_kind"]
         if row["display_metadata"] is not None:
@@ -386,7 +442,7 @@ class SessionMessagesMixin:
         api_content: Optional[str] = None, display_kind: Optional[str] = None,
         display_metadata: Optional[Dict[str, Any]] = None, compression_lock_holder: Optional[str] = None,
         turn_lease_holder: Optional[str] = None, turn_lease_ttl_seconds: float = 300.0,
-        message_uid: Optional[str] = None) -> int:
+        message_uid: Optional[str] = None, image_refs: Optional[str] = None) -> int:
         """Append one message; returns the row id and bumps the session counters. ``platform_message_id``:
         the platform's own id. ``api_content``: byte-fidelity sidecar, the exact string sent to the API when
         it differed from ``content``, stored as sent except lone surrogates. ``message_uid``: the id a caller
@@ -1220,9 +1276,16 @@ class SessionMessagesMixin:
         raw keystrokes, and the turn must not append a second row for the same input."""
         if not session_id or isinstance(row_id, bool) or not isinstance(row_id, int) or row_id <= 0:
             return 0
+        if isinstance(content, list):
+            from agent.session_persistence import _durable_content, _durable_image_parts
+            image_refs = _durable_image_parts(content, self.db_path)
+            if image_refs:
+                content = _durable_content(content)
+        else:
+            image_refs = None
         return self._write_rowcount(
-            "UPDATE messages SET content = ? WHERE id = ? AND session_id = ? AND role = 'user' AND active = 1",
-            (self._encode_content(content), row_id, session_id))
+            "UPDATE messages SET content = ?, image_refs = ? WHERE id = ? AND session_id = ? AND role = 'user' AND active = 1",
+            (self._encode_content(content), image_refs, row_id, session_id))
 
     def deactivate_message(self, session_id: str, row_id: int) -> int:
         """Deactivate ONE known row (id-addressed, idempotent; returns the affected row count). Used by
@@ -1670,6 +1733,13 @@ class SessionMessagesMixin:
         unindexed_tool_owners: List[Dict[str, Any]] = []
         for row in rows:
             content = self._loaded_view_content(row["role"], self._decode_content(row["content"]))
+            if row["image_refs"]:
+                content = _restore_image_parts(row["image_refs"], str(self.db_path))
+            elif isinstance(content, str) and row["role"] == "tool" and row["tool_name"] == "vision_analyze":
+                # Pre-sidecar vision results have already lost the image. User-authored
+                # '[screenshot]' text cannot be distinguished from the old projection.
+                content = content.replace("[screenshot]", "[image unavailable]")
+                content = re.sub(r"you can see it natively now", "image unavailable", content, flags=re.I)
             # Underscore-prefixed like ``_row_id``: transports strip it before the wire; compression's
             # assembly copies strip it so rotated child handoffs still flush (_fresh_compaction_message_copy).
             msg = {"role": row["role"], "content": content, _DB_PERSISTED_MARKER_KEY: True}
@@ -1686,6 +1756,8 @@ class SessionMessagesMixin:
             # (ACP, gateway, CLI, TUI, compression adoption), never opt-in like ``_row_id``.
             _restore_identity_columns(row, msg)
             msg.update((col, row[col]) for col in ("api_content", "display_kind") if row[col])
+            if row["image_refs"]:
+                msg["image_refs"] = row["image_refs"]
             if row["display_metadata"] and (decoded := self._decode_display_metadata(row["display_metadata"])) is not None:
                 msg["display_metadata"] = decoded
             if include_summary_markers and row["_compressed_summary"]:
