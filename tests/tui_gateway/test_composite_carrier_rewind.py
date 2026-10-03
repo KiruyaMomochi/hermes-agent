@@ -412,7 +412,7 @@ def test_retry_rejects_durable_media_before_rewind_when_warm_view_is_text(
     durable_carrier = carrier.copy()
     durable_carrier["content"] = [
         {"type": "text", "text": handoff},
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
     ]
     sid, session_key, session = install(
         [durable_carrier, {"role": "assistant", "content": "failed"}]

@@ -156,7 +156,7 @@ def test_rewind_session_surfaces_unretryable_media_before_mutation(
         "user",
         [
             {"type": "text", "text": _composite_carrier()["content"]},
-            {"type": "image_url", "image_url": {"url": "image"}},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
         ],
     )
     store._db.append_message(session_id, "assistant", "old answer")

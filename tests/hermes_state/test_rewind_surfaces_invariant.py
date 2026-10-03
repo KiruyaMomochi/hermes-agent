@@ -91,11 +91,14 @@ def test_every_surface_persists_the_same_active_set(db, n, rich):
         assert [c for _r, c in active] == [f"q{i}" if k == 0 else f"a{i}" for i in range(1, 4 - n) for k in (0, 1)]
     else:
         # The whole tool exchange of a rewound turn goes with it (no orphan tool_result), and the
-        # surviving image-bearing user rows stay byte-identical to what was stored.
+        # surviving image-bearing user rows stay byte-identical to what was stored; the image itself
+        # lives in the image_refs sidecar, so check it through the loaded projection.
         assert [r for r, _c in active] == ["user", "assistant", "tool", "assistant"] * (3 - n)
         assert [c for r, c in active if r == "user"] == [
             c for r, c, _a in expected if r == "user"][: 3 - n]
-        assert all("QUJD" in c for r, c in active if r == "user")
+        users = [m for m in db.get_messages_as_conversation(sid) if m["role"] == "user"]
+        assert users and all(
+            any(p.get("type") == "image_url" and "QUJD" in p["image_url"]["url"] for p in m["content"]) for m in users)
 
 
 def test_cli_undo_leaves_the_warm_history_shape_alone_while_the_tui_adopts_row_ids(db):

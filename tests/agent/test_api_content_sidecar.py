@@ -660,7 +660,7 @@ class TestWireInvariant:
         assert sent == [*turn, {"type": "text", "text": "PLUGIN-CTX"}]
 
         history = db.get_messages_as_conversation(sid)
-        assert "PLUGIN-CTX" in history[0]["content"]  # persisted with the turn, not dropped
+        assert {"type": "text", "text": "PLUGIN-CTX"} in history[0]["content"]
 
         handler.captured_requests = []
         agent2 = make_agent()
@@ -679,7 +679,8 @@ class TestWireInvariant:
                                           conversation_history=[], task_id="t1")
         assert "display_metadata" not in _user_messages(_chat_requests(handler)[0])[0]  # never on the wire
         history = db.get_messages_as_conversation(sid)
-        assert "PLUGIN-CTX" in history[0]["content"]  # flattened into the stored row with the ask
+        from agent.message_content import flatten_message_text
+        assert "PLUGIN-CTX" in flatten_message_text(history[0]["content"])  # retained alongside the ask
         return history
 
     def test_previous_message_after_a_reloaded_multimodal_turn_is_the_ask(self, wire_env):

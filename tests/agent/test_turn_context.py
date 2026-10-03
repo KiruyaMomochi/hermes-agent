@@ -467,7 +467,8 @@ def test_gateway_notes_alone_on_a_stored_image_turn_backfill_the_row(tmp_path):
     _append_multimodal_context(agent, row, "", plugin_user_context, preflight_compressed=False)
 
     reloaded = db.get_messages_as_conversation("s")
-    assert "GATEWAY NOTE" in reloaded[-1]["content"]
+    from agent.message_content import flatten_message_text
+    assert "GATEWAY NOTE" in flatten_message_text(reloaded[-1]["content"])
     assert _previous_user_message_text([*reloaded, {"role": "assistant", "content": "x"}]) == "look"
 
 
