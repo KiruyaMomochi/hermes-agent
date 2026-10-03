@@ -21,7 +21,7 @@ from agent.message_metadata import (
     ABSORBED_MESSAGE_UIDS, DB_ROW_SNAPSHOT, MERGED_TURN_PREFIX, MESSAGE_UID, REPAIR_BOOKKEEPING_FIELDS,
     RESTORED_FROM_STORE, TOOL_CALL_UID, TOOL_CALL_UIDS, copy_identity_fields, tool_call_uid_from_history,
 )
-from session_rules.turns import message_uid_or_none, _durable_content, _is_ephemeral_scaffolding
+from session_rules.turns import message_uid_or_none, _durable_content, _is_ephemeral_scaffolding, _is_multimodal_tool_result
 from agent.transcript_repair import sync_flushed_message_markers
 from persistence.conversation.messages import NewMessage, RowDisposition
 from session_rules.turns import _EPHEMERAL_SCAFFOLDING_FLAGS, _IMAGE_PART_TYPES
@@ -177,6 +177,17 @@ def _db_flush_scan_start(agent, messages: list[dict]) -> int:
     return scan_start
 
 
+def _content_for_storage(content: Any) -> Any:
+    """Hand image retention to the store without changing other durable projections."""
+    if _is_multimodal_tool_result(content):
+        return content
+    if isinstance(content, list) and any(
+        isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES for part in content
+    ):
+        return content
+    return _durable_content(content)
+
+
 def _db_flush_row(agent, msg: dict, is_current_turn_user: bool) -> dict[str, Any]:
     """Build the session-db row for ``msg``, applying the persist override to THIS row only."""
     role = msg.get("role", "unknown")
@@ -199,7 +210,7 @@ def _db_flush_row(agent, msg: dict, is_current_turn_user: bool) -> dict[str, Any
         api_content = content
     # Key order is the divert-JSONL wire order (divert_session_transcript_jsonl).
     row = {
-        "role": role, "content": _durable_content(content),
+        "role": role, "content": _content_for_storage(content),
         "tool_name": msg.get("tool_name") or (msg.get("name") if role == "tool" else None),
         "tool_calls": msg["tool_calls"] if isinstance(msg.get("tool_calls"), list) else None,
         "tool_call_id": msg.get("tool_call_id"), "effect_disposition": msg.get("effect_disposition"),

@@ -2,6 +2,7 @@
 
 
 from __future__ import annotations
+from persistence.sqlite.conversation._store.image_refs import restored_content
 from typing import Any, Optional
 from session_rules.turns import _DB_PERSISTED_MARKER as _DB_PERSISTED_MARKER_KEY
 from persistence.sqlite.conversation._store.sql_common import _id_chunks, _placeholders
@@ -119,7 +120,7 @@ def held_row_mismatches(holder: StoreHolder, conn, session_id: str, held: list[d
             message.get("role", "unknown"), message.get("content"), message.get("tool_call_id"),
             _parse_tool_calls(message.get("tool_calls")))
         stored_identity = _row_identity(
-            row["role"], _decode_content(row["content"]), row["tool_call_id"],
+            row["role"], restored_content(row, str(holder.db_path), _decode_content), row["tool_call_id"],
             _parse_tool_calls(row["tool_calls"]))
         if held_identity != stored_identity:
             mismatches.append(int(row["id"]))
@@ -197,7 +198,7 @@ def rewrite_pruned_rows(holder: StoreHolder, session_id: str, changes: list[tupl
                 raise PruneRowStaleError(f"row {ids[0]} no longer holds the pruned {role} message")
         elif (_row_identity(role, original.get("content"), original.get("tool_call_id"),
                                  _parse_tool_calls(original.get("tool_calls")))
-                != _row_identity(row["role"], _decode_content(row["content"]),
+                != _row_identity(row["role"], restored_content(row, str(holder.db_path), _decode_content),
                                        row["tool_call_id"], _parse_tool_calls(row["tool_calls"]))):
             # No digest (a resumed dict): compare through the loader lens instead, the same
             # representation both sides of _stamp_kept_live_prefix use.

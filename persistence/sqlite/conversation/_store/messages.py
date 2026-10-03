@@ -2,6 +2,7 @@
 
 
 from __future__ import annotations
+from persistence.sqlite.conversation._store.image_refs import image_content, restored_content
 import hashlib
 import json
 import time
@@ -191,7 +192,11 @@ def _message_row_params(holder: StoreHolder, session_id: str, role: str, msg: di
     ``message_id`` (yuanbao's message-dict convention)."""
     _str_or_none = lambda v: _scrub_surrogates(v) if isinstance(v, str) else None
     _reasoning = lambda key: msg.get(key) if keep_reasoning else None
-    encoded_content = _encode_content(msg.get("content"))
+    content = msg.get("content")
+    if isinstance(content, (list, dict)):
+        content, refs = image_content(content, str(holder.db_path))
+        msg["image_refs"] = refs
+    encoded_content = _encode_content(content)
     encoded_tool_calls = json.dumps(tool_calls) if tool_calls else None
     encoded_tool_name = _scrub_surrogates(msg.get("tool_name"))
     display_metadata = msg.get("display_metadata")
@@ -203,6 +208,7 @@ def _message_row_params(holder: StoreHolder, session_id: str, role: str, msg: di
         "role": role, "content": encoded_content, "timestamp": message_timestamp,
         "tool_call_id": msg.get("tool_call_id"), "tool_calls": encoded_tool_calls,
         "tool_name": encoded_tool_name, "display_kind": msg.get("display_kind"),
+        "image_refs": msg.get("image_refs"),
         "display_metadata": display_metadata,
     }
     return (session_id, role, encoded_content, msg.get("tool_call_id"),
@@ -216,7 +222,7 @@ def _message_row_params(holder: StoreHolder, session_id: str, role: str, msg: di
         _str_or_none(msg.get("api_content")), _str_or_none(msg.get("display_kind")),
         display_metadata, _display_identity(_display_dedupe_key(holder, identity_row)),
         message_uid_or_none(msg), _absorbed_uids_json(msg),
-        _tool_call_uids_json(msg), _tool_call_uid_or_none(msg))
+        _tool_call_uids_json(msg), _tool_call_uid_or_none(msg), _str_or_none(msg.get("image_refs")))
 
 
 def _stamp_tool_call_uids(msg: dict[str, Any], tool_calls: Any, batch_index: dict[str, str]) -> None:
@@ -263,7 +269,7 @@ def _decoded_repair_row(holder: StoreHolder, row) -> dict[str, Any]:
     """Decode one durable row without replay dedupe, alternation repair, or content stripping."""
     msg: dict[str, Any] = {
         "role": row["role"],
-        "content": _decode_content(row["content"]),
+        "content": restored_content(row, str(holder.db_path), _decode_content),
     }
     for column in ("tool_call_id", "tool_name", "effect_disposition", "token_count", "finish_reason"):
         if row[column] is not None:
@@ -280,6 +286,8 @@ def _decoded_repair_row(holder: StoreHolder, row) -> dict[str, Any]:
     if row["_compressed_summary"]:
         msg["_compressed_summary"] = True
     _restore_identity_columns(row, msg)
+    if row["image_refs"] is not None:
+        msg["image_refs"] = row["image_refs"]
     if row["api_content"] is not None:
         msg["api_content"] = row["api_content"]
     if row["display_kind"] is not None:
@@ -322,7 +330,7 @@ def append_message(
     api_content: Optional[str] = None, display_kind: Optional[str] = None,
     display_metadata: Optional[dict[str, Any]] = None, compression_lock_holder: Optional[str] = None,
     turn_lease_holder: Optional[str] = None, turn_lease_ttl_seconds: float = 300.0,
-    message_uid: Optional[str] = None) -> int:
+    message_uid: Optional[str] = None, image_refs: Optional[str] = None) -> int:
     """Append one message; returns the row id and bumps the session counters. ``platform_message_id``:
     the platform's own id. ``api_content``: byte-fidelity sidecar, the exact string sent to the API when
     it differed from ``content``, stored as sent except lone surrogates. ``message_uid``: the id a caller
@@ -735,7 +743,7 @@ def _stamp_kept_live_prefix(holder: StoreHolder, live: list, messages: list[dict
             break
         identity = _row_identity(role, msg.get("content"), msg.get("tool_call_id"),
                                       _parse_tool_calls(msg.get("tool_calls")))
-        if identity != _row_identity(row[1], _decode_content(row[2]), row[3], _parse_tool_calls(row[4])):
+        if identity != _row_identity(row[1], restored_content(row, str(holder.db_path), _decode_content), row[3], _parse_tool_calls(row[4])):
             break
         msg["_row_id"] = row[0]
         if row[5]:
@@ -995,14 +1003,15 @@ def set_user_message_content(holder: StoreHolder, session_id: str, row_id: int, 
     the same input. ``display_metadata``, when given, is merge-patched in (``None`` deletes; reactions survive)."""
     if not session_id or isinstance(row_id, bool) or not isinstance(row_id, int) or row_id <= 0:
         return 0
+    content, image_refs = image_content(content, str(holder.db_path))
     if display_metadata is None:
         return holder._write_rowcount(
-            "UPDATE messages SET content = ? WHERE id = ? AND session_id = ? AND role = 'user' AND active = 1",
-            (_encode_content(content), row_id, session_id))
+            "UPDATE messages SET content = ?, image_refs = ? WHERE id = ? AND session_id = ? AND role = 'user' AND active = 1",
+            (_encode_content(content), image_refs, row_id, session_id))
     return holder._write_rowcount(
-        f"UPDATE messages SET content = ?, api_content = NULL, display_metadata = {_MERGE_DISPLAY_META} "
+        f"UPDATE messages SET content = ?, image_refs = ?, api_content = NULL, display_metadata = {_MERGE_DISPLAY_META} "
         "WHERE id = ? AND session_id = ? AND role = 'user' AND active = 1",
-        (_encode_content(content), _encode_display_metadata(display_metadata), row_id, session_id))
+        (_encode_content(content), image_refs, _encode_display_metadata(display_metadata), row_id, session_id))
 
 
 def deactivate_message(holder: StoreHolder, session_id: str, row_id: int) -> int:
@@ -1058,11 +1067,13 @@ def _display_dedupe_key(holder: StoreHolder, row) -> tuple[Any, ...]:
     dedupe_content = row["content"]
     if row["role"] == "user":
         handoff, live_view = split_user_originated_turn({
-            "role": "user", "content": _decode_content(row["content"]),
+            "role": "user", "content": restored_content(row, str(holder.db_path), _decode_content),
             "display_kind": row["display_kind"],
             "display_metadata": _decode_display_metadata(row["display_metadata"])})
         if handoff is not None and live_view is not None:
             dedupe_content = _encode_content(live_view.get("content"))
+    if "image_refs" in row.keys() and row["image_refs"]:
+        dedupe_content = (dedupe_content, row["image_refs"])
     return _stable_tool_key(row) or (
         row["role"], dedupe_content, row["timestamp"], row["tool_call_id"], row["tool_calls"], row["tool_name"])
 
@@ -1584,7 +1595,7 @@ def _rows_to_conversation(holder: StoreHolder, rows, *, session_id: str, include
     # build's) needs the index, so rows this build wrote never pay for it. Indexed in order: same shadowing.
     unindexed_tool_owners: list[dict[str, Any]] = []
     for row in rows:
-        content = _loaded_view_content(row["role"], _decode_content(row["content"]))
+        content = _loaded_view_content(row["role"], restored_content(row, str(holder.db_path), _decode_content))
         # Underscore-prefixed like ``_row_id``: transports strip it before the wire; compression's
         # assembly copies strip it so rotated child handoffs still flush (_fresh_compaction_message_copy).
         msg = {"role": row["role"], "content": content, _DB_PERSISTED_MARKER_KEY: True}
@@ -1600,7 +1611,7 @@ def _rows_to_conversation(holder: StoreHolder, rows, *, session_id: str, include
         # The durable identity is part of the message, like ``timestamp``: restored on EVERY projection
         # (ACP, gateway, CLI, TUI, compression adoption), never opt-in like ``_row_id``.
         _restore_identity_columns(row, msg)
-        msg.update((col, row[col]) for col in ("api_content", "display_kind") if row[col])
+        msg.update((col, row[col]) for col in ("image_refs", "api_content", "display_kind") if row[col])
         if row["display_metadata"] and (decoded := _decode_display_metadata(row["display_metadata"])) is not None:
             msg["display_metadata"] = decoded
             lift_data_use(msg)
@@ -1825,7 +1836,7 @@ def _split_rewind_target(holder: StoreHolder, target_row: dict[str, Any], expect
     if not target_row.get("active"):
         raise ValueError("rewind target is not active")
     handoff, live_view = split_user_originated_turn({
-        **target_row, "content": _decode_content(target_row.get("content")),
+        **target_row, "content": restored_content(target_row, str(holder.db_path), _decode_content),
         "display_metadata": _decode_display_metadata(target_row.get("display_metadata"))})
     if live_view is None:
         raise ValueError("rewind target is not a user-originated turn")

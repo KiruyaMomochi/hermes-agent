@@ -66,7 +66,7 @@ _REWIND_REFUSALS = {
 
 # ``NewMessage`` fields that travel under their own name when set.
 _MESSAGE_OPTIONALS = (
-    "tool_name", "tool_call_id", "display_kind", "api_content", "platform_message_id", "effect_disposition",
+    "tool_name", "tool_call_id", "display_kind", "api_content", "image_refs", "platform_message_id", "effect_disposition",
     "finish_reason", "reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items",
     "codex_message_items", "token_count", "message_uid",
 )
@@ -74,7 +74,7 @@ _WIRE_FIELDS = (
     "role", "content", "timestamp", "tool_call_id", "tool_calls", "tool_name", "effect_disposition", "token_count",
     "finish_reason", "reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items",
     "codex_message_items", "platform_message_id", "api_content", "display_kind", "display_metadata", "message_uid",
-    "absorbed_message_uids", "tool_call_uids", "tool_call_uid",
+    "absorbed_message_uids", "tool_call_uids", "tool_call_uid", "image_refs",
 )
 _SIDECARS = ("reasoning_details", "codex_reasoning_items", "codex_message_items")
 
@@ -210,7 +210,7 @@ def _message_record(row: Mapping[str, Any]) -> MessageRecord:
         tool_calls=tuple(row.get("tool_calls") or ()), tool_name=row.get("tool_name"),
         tool_call_id=row.get("tool_call_id"), display_kind=row.get("display_kind"),
         compressed_summary=bool(row.get("_compressed_summary")),
-        visibility=_visibility(row.get("active"), row.get("compacted")), api_content=row.get("api_content"),
+        visibility=_visibility(row.get("active"), row.get("compacted")), api_content=row.get("api_content"), image_refs=row.get("image_refs"),
         display_metadata=metadata, platform_message_id=row.get("platform_message_id"),
         observed=bool(row.get("observed")), effect_disposition=row.get("effect_disposition"),
         finish_reason=row.get("finish_reason"), reasoning=row.get("reasoning"),
@@ -287,7 +287,7 @@ class SQLiteMessageRepository:
         msg = _message_dict(message)
         with _refusals(holder, session_id):
             return MessageId(append_message(holder,
-                session_id, message.role, content=message.content, tool_name=message.tool_name,
+                session_id, message.role, content=message.content, image_refs=message.image_refs, tool_name=message.tool_name,
                 tool_calls=msg.get("tool_calls"), tool_call_id=message.tool_call_id, token_count=message.token_count,
                 finish_reason=message.finish_reason, reasoning=message.reasoning,
                 reasoning_content=message.reasoning_content, reasoning_details=message.reasoning_details,

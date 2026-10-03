@@ -217,6 +217,7 @@ CREATE TABLE IF NOT EXISTS messages (
     active INTEGER NOT NULL DEFAULT 1,
     compacted INTEGER NOT NULL DEFAULT 0,
     api_content TEXT,
+    image_refs TEXT,
     display_kind TEXT,
     display_metadata TEXT,
     display_identity BLOB,
@@ -544,8 +545,9 @@ END;
 DROP TRIGGER IF EXISTS messages_display_identity_update;
 CREATE TRIGGER IF NOT EXISTS messages_display_identity_update
 AFTER UPDATE OF role, content, timestamp, tool_call_id, tool_calls, tool_name,
-                display_kind ON messages
+                display_kind, image_refs ON messages
 WHEN new.role IS NOT old.role
+  OR new.image_refs IS NOT old.image_refs
   OR new.content IS NOT old.content
   OR new.timestamp IS NOT old.timestamp
   OR new.tool_call_id IS NOT old.tool_call_id

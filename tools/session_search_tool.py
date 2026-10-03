@@ -274,6 +274,22 @@ def _content_text(content: Any) -> str:
     return "" if content is None else str(content)
 
 
+def _derived_retained_content(m: TranscriptRow | MessageRecord) -> Any:
+    """Keep multipart discovery shape without loading retained image bytes into recall."""
+    raw = m.image_refs
+    if not raw:
+        return m.content
+    try:
+        parts = json.loads(raw)
+    except (ValueError, TypeError):
+        return m.content
+    if not isinstance(parts, list):
+        return m.content
+    return [({"type": "text", "text": p.get("text", "")} if p.get("type") == "text" else
+             {"type": "image_url", "image_url": {"url": _DATA_URL_PLACEHOLDER}})
+            for p in parts if isinstance(p, dict)]
+
+
 def _shape_message(m: TranscriptRow | MessageRecord, anchor_id: Optional[int] = None,
                    max_content_len: Optional[int] = None, derived: bool = False) -> dict[str, Any]:
     """Slim a stored row; keeps ``content`` even when empty (tool-call-only turns).
@@ -281,7 +297,7 @@ def _shape_message(m: TranscriptRow | MessageRecord, anchor_id: Optional[int] = 
     ``derived`` marks rows surfaced by a discovery query rather than an explicit
     ``session_id`` read: those resurface across sessions, so they get the same
     strict redaction as compaction summaries (#113165)."""
-    content = m.content
+    content = _derived_retained_content(m) if derived else m.content
     if isinstance(content, str) and "\x1b" in content:  # archived terminal output carries ANSI
         from tools.ansi_strip import strip_ansi
         content = strip_ansi(content)

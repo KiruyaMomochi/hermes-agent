@@ -25,13 +25,15 @@ from persistence.conversation.sessions import NewSession
 @pytest.mark.parametrize("kind", ["identical", "reordered", "list-order"])
 def test_prefix_keeps_role_specific_content_identity(backend, scope_a, role, reordered_retained, kind):
     store_a = backend.open(scope_a)
+    # Image payloads have an intentional searchable-text projection; use opaque audio parts here
+    # to exercise the generic structured-content codec and key-order identity contract.
     original = [
         {"type": "text", "text": "look"},
-        {"type": "image_url", "image_url": {"url": "https://example.invalid/picture", "detail": "low"}},
+        {"type": "audio_url", "audio_url": {"url": "https://example.invalid/picture", "detail": "low"}},
     ]
     reordered = [
         {"text": "look", "type": "text"},
-        {"image_url": {"detail": "low", "url": "https://example.invalid/picture"}, "type": "image_url"},
+        {"audio_url": {"detail": "low", "url": "https://example.invalid/picture"}, "type": "audio_url"},
     ]
     copies = {"identical": deepcopy(original), "reordered": reordered, "list-order": list(reversed(original))}
     for sid, parent, content in [("parent", None, original), ("child", "parent", copies[kind])]:

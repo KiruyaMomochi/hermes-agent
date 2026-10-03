@@ -73,7 +73,9 @@ def test_every_call_persists_the_same_active_set(holder, n, rich):
         assert [r for r, _c in active] == ["user", "assistant", "tool", "assistant"] * (3 - n)
         assert [c for r, c in active if r == "user"] == [
             c for r, c, _a in expected if r == "user"][: 3 - n]
-        assert all("QUJD" in c for r, c in active if r == "user")
+        assert all("[screenshot]" in c and "base64" not in c for r, c in active if r == "user")
+        replay = get_messages_as_conversation(holder, sid)
+        assert all(m["content"][1] == _IMAGE for m in replay if m["role"] == "user")
 
 
 def test_warm_rewind_leaves_the_warm_history_shape_alone_while_adoption_takes_row_ids(holder):

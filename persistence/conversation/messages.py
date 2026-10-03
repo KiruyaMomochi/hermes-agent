@@ -140,6 +140,12 @@ class NewMessage:
 
     ``timestamp`` ``None`` takes the store's clock; ``message_uid`` ``None`` is minted at insert. ``repair_target`` and ``db_row_snapshot`` name the stored row a batch row already has and its ownership version, so ``append_batch`` repairs or adopts that row instead of inserting a duplicate; ``compact`` reads them too, to tell a replacement message that carries a row newer than its watermark (see ``MessageRepository.compact``). ``append_batch`` folds ``data_use`` into ``display_metadata`` as the store keeps it; a single ``append`` drops it. String ``content`` reads back as written (lone surrogates replaced), including a string that starts with the store's reserved ``\\x00json:`` prefix, which the store escapes on write; structured content reads back as its JSON round trip.
 
+    ``image_refs`` carries the retained image sidecar separately from searchable ``content``. SQLite
+    snapshots data/local image parts under the owning database's home and keeps HTTP(S) references
+    without fetching them. Image-bearing multipart content is authoritative over a supplied sidecar;
+    replay restores its ordered parts, substituting an unavailable notice for missing/damaged images.
+    Transcript reads keep the searchable text projection and the sidecar, never inline image bytes.
+
     ``restored_from_store`` marks a row the writer already saw durable in this session (its uid came from a stored row). ``append_batch`` does not insert such a row when it has no ``repair_target`` and no ``db_row_snapshot``, its uid names an active row of the session, and it replays exactly like that row: the same owned payload, ``api_content`` and ``codex_reasoning_items``, the stored content compared as a load returns it, and the stored token count, summary flag and uid maps standing in where the row lacks them. Its outcome is then ``REPAIRED`` with the stamp of the newest active row of its role carrying that uid. An edited copy, one with a new replay sidecar, or one whose uid names no active row is inserted as usual; nothing stores the mark.
 
     ``merged_durable_rows``, ``unnamed_durable_rows`` and ``absorbed_row_ids`` are the alternation repair's markers, named as on ``HeldMessage``; they name no column and no read returns them: the user rows merged into the message (two or more; 0 for none), the further durable rows it stands for on a reload without row ids (rows the repair dropped behind it or folded into it), and the row ids merged into it. A ``compact`` without a holding coverage proof widens the carried tail's rewind by them for each carried row without a ``repair_target``.
@@ -153,6 +159,7 @@ class NewMessage:
     tool_call_id: Optional[str] = None
     display_kind: Optional[str] = None
     compressed_summary: bool = False
+    image_refs: Optional[str] = None
     api_content: Optional[str] = None
     display_metadata: Optional[dict[str, JsonValue]] = None
     platform_message_id: Optional[str] = None
@@ -199,7 +206,7 @@ class NewMessage:
             role=get("role", "unknown"), content=get("content"), timestamp=get("timestamp"),
             tool_calls=tuple(tool_calls) if isinstance(tool_calls, (list, tuple)) else (),
             tool_name=get("tool_name"), tool_call_id=get("tool_call_id"), display_kind=get("display_kind"),
-            compressed_summary=bool(get("_compressed_summary")), api_content=get("api_content"),
+            compressed_summary=bool(get("_compressed_summary")), api_content=get("api_content"), image_refs=get("image_refs"),
             display_metadata=get("display_metadata"), platform_message_id=get("platform_message_id") or get("message_id") or None,
             observed=bool(get("observed")), effect_disposition=get("effect_disposition"), finish_reason=get("finish_reason"),
             reasoning=get("reasoning"), reasoning_content=get("reasoning_content"), reasoning_details=get("reasoning_details"),
@@ -455,6 +462,7 @@ class MessageRecord:
     display_kind: Optional[str]
     compressed_summary: bool
     visibility: RowVisibility
+    image_refs: Optional[str] = None
     api_content: Optional[str] = None
     display_metadata: Optional[dict[str, JsonValue]] = None
     platform_message_id: Optional[str] = None
@@ -536,6 +544,7 @@ _CONVERSATION_KEYS: tuple[tuple[str, str], ...] = (
     ("message_uid", "message_uid"),
     ("_tool_call_uids", "tool_call_uids"),
     ("_absorbed_message_uids", "absorbed_message_uids"),
+    ("image_refs", "image_refs"),
     ("api_content", "api_content"),
     ("display_kind", "display_kind"),
     ("display_metadata", "display_metadata"),
@@ -606,6 +615,7 @@ class ConversationMessage:
     tool_call_uids: Optional[JsonValue] = None
     tool_call_uid: Optional[str] = None
     absorbed_message_uids: tuple[str, ...] = ()
+    image_refs: Optional[str] = None
     api_content: Optional[str] = None
     display_kind: Optional[str] = None
     display_metadata: Optional[dict[str, JsonValue]] = None
@@ -829,7 +839,7 @@ _WIRE_ROW_KEYS = (
     "timestamp", "token_count", "finish_reason", "reasoning", "reasoning_content", "reasoning_details",
     "codex_reasoning_items", "codex_message_items", "platform_message_id", "observed", "active", "compacted",
     "api_content", "display_kind", "display_metadata", "message_uid", "absorbed_message_uids", "tool_call_uids",
-    "tool_call_uid",
+    "tool_call_uid", "image_refs",
 )
 
 
@@ -860,6 +870,7 @@ class TranscriptRow:
     platform_message_id: Optional[str] = None
     observed: bool = False
     compressed_summary: bool = False
+    image_refs: Optional[str] = None
     api_content: Optional[str] = None
     display_kind: Optional[str] = None
     display_metadata: Optional[dict[str, JsonValue]] = None

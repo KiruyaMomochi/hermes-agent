@@ -158,7 +158,7 @@ def test_rewind_session_surfaces_unretryable_media_before_mutation(
             "role": "user",
             "content": [
                 {"type": "text", "text": _composite_carrier()["content"]},
-                {"type": "image_url", "image_url": {"url": "image"}},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
             ],
         },
     )
@@ -411,7 +411,7 @@ async def test_gateway_retry_rejects_media_before_redispatch_or_token_reset():
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "look again"},
-                        {"type": "image_url", "image_url": {"url": "image"}},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
                     ],
                 },
                 {"role": "assistant", "content": "old answer"},

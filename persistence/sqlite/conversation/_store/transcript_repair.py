@@ -143,6 +143,7 @@ def _same_as_stored(
     msg: dict[str, Any], rows: list[sqlite3.Row],
     serialize_message_fn: Callable[[dict[str, Any], float], Mapping[str, Any]],
     encode_content_fn: Callable[[Any], Any], decode_content_fn: Callable[[Any], Any],
+    decode_row_fn: Callable[[Mapping[str, Any]], dict[str, Any]],
 ) -> bool:
     """*msg* serializes to the replayed columns of one of its uid's active *rows*: the re-handed copy, not an edit.
 
@@ -155,8 +156,8 @@ def _same_as_stored(
         for column, key in _RESTORE_MAY_OMIT:
             if not msg.get(key):
                 serialized[column] = row[column]
-        if serialized["content"] == encode_content_fn(
-            _loaded_view_content(row["role"], decode_content_fn(row["content"]))
+        if encode_content_fn(msg.get("content")) == encode_content_fn(
+            _loaded_view_content(row["role"], decode_row_fn(row)["content"])
         ):
             serialized["content"] = row["content"]
         if all(row[column] == serialized[column] for column in _REPLAY_COLUMNS):
@@ -204,7 +205,7 @@ def resolve_and_repair_transcript_batch(
                 isinstance(msg, dict)
                 and (stored := durable_uids.get(message_uid_or_none(msg) or ""))
                 and not msg.get(_PERSIST_AFTER_ADMISSION_INTERRUPT)
-                and _same_as_stored(msg, stored, serialize_message_fn, encode_content_fn, decode_content_fn)
+                and _same_as_stored(msg, stored, serialize_message_fn, encode_content_fn, decode_content_fn, decode_row_fn)
             ):
                 # Restored logical message, no row address and no CAS version (the wire strip removes
                 # every underscore-prefixed field): its uid already names an ACTIVE durable row holding

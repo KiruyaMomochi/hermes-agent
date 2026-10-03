@@ -302,8 +302,8 @@ def test_hit_context_is_the_neighbouring_rows_whatever_their_visibility(backend,
     store_a.search.seed_session("ctx", source="cli", started_at=T0)
     seed("ctx", "user", "ctxterm alpha lead", timestamp=T0 + 1)
     seed("ctx", "assistant", "rewound reply " + "x" * 300, timestamp=T0 + 2, visibility=RowVisibility.REWOUND)
-    seed("ctx", "user", [{"type": "text", "text": "ctxterm multimodal part"}, {"type": "image_url", "image_url": {"url": "u"}}], timestamp=T0 + 3)
-    seed("ctx", "user", [{"type": "image_url", "image_url": {"url": "u"}}], timestamp=T0 + 4)
+    seed("ctx", "user", [{"type": "text", "text": "ctxterm multimodal part"}, {"type": "audio_url", "audio_url": {"url": "u"}}], timestamp=T0 + 3)
+    seed("ctx", "user", [{"type": "audio_url", "audio_url": {"url": "u"}}], timestamp=T0 + 4)
     seed("ctx", "user", {"text": "dictvalue"}, timestamp=T0 + 5)
     seed("ctx", "user", "short ctxterm tail", timestamp=T0 + 6, display_kind="hidden")
     seed("ctx", "user", "closing ctxterm", timestamp=T0 + 7)
@@ -311,7 +311,7 @@ def test_hit_context_is_the_neighbouring_rows_whatever_their_visibility(backend,
     rewound = "rewound reply " + "x" * 186
     # CONTRACT: previous row, the row, next row by (timestamp, id); text cut to 200; parts flattened, a parts list without text is a placeholder, a mapping is empty.
     assert [(c.role, c.content) for c in hits[">>>ctxterm<<< alpha lead"]] == [("user", "ctxterm alpha lead"), ("assistant", rewound)]
-    assert [c.content for c in hits[">>>ctxterm<<< multimodal part\"}, {\"type\": \"image_url\", \"image_url\": {\"url\": \"u\"}}]"]] == [rewound, "ctxterm multimodal part", "[multimodal content]"]
+    assert [c.content for c in hits[">>>ctxterm<<< multimodal part\"}, {\"type\": \"audio_url\", \"audio_url\": {\"url\": \"u\"}}]"]] == [rewound, "ctxterm multimodal part", "[multimodal content]"]
     assert [c.content for c in hits["closing >>>ctxterm<<<"]] == ["short ctxterm tail", "closing ctxterm"]
     assert [c.content for c in store_a.search.search_messages("dictvalue")[0].context] == ["[multimodal content]", "", "short ctxterm tail"]
 

@@ -2,6 +2,7 @@
 
 
 from __future__ import annotations
+from persistence.sqlite.conversation._store.image_refs import restored_content
 from collections import Counter
 from typing import Any, Optional
 from session_rules.turns import MESSAGE_UID, message_uid_or_none
@@ -128,7 +129,7 @@ def _index_held_dicts(holder: StoreHolder, compacted_messages: list[dict[str, An
 def _claim_stored_copy(holder: StoreHolder, row, compacted_messages, by_row, by_uid, claimed) -> Optional[int]:
     """First pass: the unclaimed dict naming *row* (``_row_id``, else uid) that replays exactly as it does."""
     identity = _row_identity(
-        row["role"], _decode_content(row["content"]), row["tool_call_id"], _parse_tool_calls(row["tool_calls"]))
+        row["role"], restored_content(row, str(holder.db_path), _decode_content), row["tool_call_id"], _parse_tool_calls(row["tool_calls"]))
     named = by_row.get(int(row["id"]))
     candidates = [named[0]] if named is not None and named[1] == identity else []
     row_uid = row[MESSAGE_UID] or None
@@ -164,7 +165,7 @@ def _replays_as(holder: StoreHolder, row, held: dict[str, Any], same_content: bo
     from persistence.sqlite.conversation._store.transcript_repair import REPLAY_SIDECARS
 
     serialized = _serialized_message_row(holder, row["session_id"], held, float(row["timestamp"] or 0))
-    content = _decode_content(row["content"])
+    content = restored_content(row, str(holder.db_path), _decode_content)
     row_api, held_api = (None if api == text else api for api, text in (
         (row["api_content"], content), (serialized["api_content"], held.get("content"))))
     if any(serialized[column] is not None and serialized[column] != row[column] for column in REPLAY_SIDECARS):
@@ -200,7 +201,7 @@ def _rewrite_explains(holder: StoreHolder, row, held: dict[str, Any]) -> bool:
         return False
     if (_parse_tool_calls(held.get("tool_calls")) or None) != (_parse_tool_calls(row["tool_calls"]) or None):
         return False
-    stored = _loaded_view_content(role, _decode_content(row["content"]))
+    stored = _loaded_view_content(role, restored_content(row, str(holder.db_path), _decode_content))
     content = _loaded_view_content(role, held.get("content"))
     if not _replays_as(holder, row, held, stored == content):
         return False
@@ -266,13 +267,13 @@ def _resolve_carried_row_ids(
         by_key: dict[tuple[Any, ...], list[int]] = {}
         narrow = f" AND id IN ({_placeholders(ids)})" if ids else ""
         for row in conn.execute(
-            "SELECT id, role, content, tool_call_id, tool_calls, timestamp FROM messages "
+            "SELECT id, role, content, tool_call_id, tool_calls, timestamp, image_refs FROM messages "
             f"WHERE session_id = ? AND active = 1{narrow} ORDER BY id",
             (session_id, *(ids or ())),
         ).fetchall():
             rid = int(row["id"])
             by_id[rid] = _row_identity(
-                row["role"], _decode_content(row["content"]), row["tool_call_id"],
+                row["role"], restored_content(row, str(holder.db_path), _decode_content), row["tool_call_id"],
                 _parse_tool_calls(row["tool_calls"]))
             ts = coerce_epoch(row["timestamp"], field="message timestamp")
             if ts is not None:
@@ -323,13 +324,13 @@ def _matching_retired_ids(
     role = str(retired.get("role") or "")
     bound = watermark is not None
     rows = conn.execute(
-        "SELECT id, content, tool_call_id, tool_calls FROM messages WHERE session_id = ? AND active = 1 "
+        "SELECT id, role, content, tool_call_id, tool_calls, image_refs FROM messages WHERE session_id = ? AND active = 1 "
         f"AND role = ?{' AND id <= ?' if bound else ''} ORDER BY id",
         (session_id, role, *((int(watermark),) if bound else ()))).fetchall()
     want_calls = list(retired.get("tool_call_ids") or ())
     matches = []
     for row in rows:
-        content = _loaded_view_content(role, _decode_content(row["content"]))
+        content = _loaded_view_content(role, restored_content(row, str(holder.db_path), _decode_content))
         if (content or None) != (retired.get("content") or None):
             continue
         if (row["tool_call_id"] or None) != (retired.get("tool_call_id") or None):
@@ -365,9 +366,9 @@ def _merged_user_run(
     content, _ = strip_leading_message_timestamps(content)
     bound = watermark is not None
     rows = [
-        (int(row["id"]), row["role"], _loaded_view_content(row["role"], _decode_content(row["content"])))
+        (int(row["id"]), row["role"], _loaded_view_content(row["role"], restored_content(row, str(holder.db_path), _decode_content)))
         for row in conn.execute(
-            f"SELECT id, role, content FROM messages WHERE session_id = ? AND active = 1"
+            f"SELECT id, role, content, image_refs FROM messages WHERE session_id = ? AND active = 1"
             f"{' AND id <= ?' if bound else ''} ORDER BY id",
             (session_id, *((int(watermark),) if bound else ()))).fetchall()]
     # Dropping an orphan can make user rows adjacent only in the repaired view.

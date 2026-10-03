@@ -126,7 +126,7 @@ def projection_script() -> Script:
             .msg(SESSION, "tool", "answer for call-1", 5, tool_call_id="call-1", tool_name="f")
             .msg(SESSION, "assistant", "final", 6, reasoning_content="", display_kind="final",
                  reasoning_details="[]", codex_reasoning_items='[{"id": "r1"}]', codex_message_items="")
-            .msg(SESSION, "user", [{"type": "text", "text": "multimodal"}, {"type": "image_url", "image_url": {"url": "data:,x"}}], 7)
+            .msg(SESSION, "user", [{"type": "text", "text": "multimodal"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,eA=="}}], 7)
             .msg(SESSION, "assistant", "rewound reply", 8)
             .rewind(SESSION, 7))
 
@@ -165,7 +165,7 @@ def test_read_conversation_projection_policy(backend, scope_a):
     assert (wire[6]["reasoning_details"], wire[6]["codex_reasoning_items"]) == ([], [{"id": "r1"}])
     assert "codex_message_items" not in wire[6]
     everything = repo.read_conversation(SESSION, ConversationRequest(view=TranscriptView.ALL))
-    assert everything[7].content == [{"type": "text", "text": "multimodal"}, {"type": "image_url", "image_url": {"url": "data:,x"}}]
+    assert everything[7].content == [{"type": "text", "text": "multimodal"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,eA=="}}]
     repaired = repo.read_conversation(SESSION, ConversationRequest(repair_alternation=True))
     assert [m.role for m in repaired] == ["assistant", "user", "assistant", "tool", "assistant"]
     assert repaired[1].content == "first ask\n\nsecond ask in a row" and repaired[1].api_content is None
@@ -805,7 +805,7 @@ def test_rewind_user_turn_refusals_write_nothing(backend, scope_a):
     """CONTRACT: out-of-range ordinal and require_composite on a plain turn are RewindTargetUnavailable; require_retryable on media content is ValueError; every refusal leaves the transcript untouched."""
     _seed_dialogue(backend, scope_a)
     repo = backend.open(scope_a).messages
-    repo.append(W, new("user", [{"type": "image_url", "image_url": {"url": "data:,x"}}], 6))
+    repo.append(W, new("user", [{"type": "image_url", "image_url": {"url": "data:image/png;base64,eA=="}}], 6))
     before = _replay(repo)
     with pytest.raises(RewindTargetUnavailable):
         repo.rewind_user_turn(W, 4)

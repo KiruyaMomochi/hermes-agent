@@ -347,7 +347,7 @@ def test_replacement_tool_calls_preserve_key_order(backend, scope_a, reordered):
 
 @pytest.mark.parametrize("content, options, query", [
     ({"message": "mappingneedle"}, {}, "mappingneedle"),
-    ([{"type": "image_url", "image_url": {"url": "https://invalid.example/imageneedle.png"}}], {}, "imageneedle"),
+    ([{"type": "audio_url", "audio_url": {"url": "https://invalid.example/medianeedle.wav"}}], {}, "medianeedle"),
     (1234567, {}, "1234567"),
     (False, {}, "0"),
     (True, {}, "1"),
