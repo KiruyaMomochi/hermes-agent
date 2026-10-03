@@ -1,11 +1,15 @@
 """Durable transcript persistence for ``AIAgent`` (mixin; MRO-resolved from ``run_agent``): SQLite flush
 with intrinsic ``_DB_PERSISTED_MARKER`` dedup, ephemeral-scaffolding filtering, explicit
 trajectory export."""
+import base64
+import binascii
 import hashlib
-
+import json
 import logging
 import re
 from contextlib import nullcontext
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -120,7 +124,7 @@ def _summary_display_kind(msg: Dict) -> Any:
 
 
 def _durable_content(content: Any) -> Any:
-    """Text-only DB projection: multimodal envelopes → summary; part lists keep text, images → ``[screenshot]``."""
+    """Searchable text projection; image parts are retained in ``image_refs``."""
     if _is_multimodal_tool_result(content):
         return _multimodal_text_summary(content)
     if not isinstance(content, list):
@@ -131,6 +135,64 @@ def _durable_content(content: Any) -> Any:
         if isinstance(p, dict) and (p.get("type") == "text" or p.get("type") in _IMAGE_PART_TYPES)
     ]
     return "\n".join(txt) if txt else None
+
+
+def _durable_image_parts(content: Any, db_path: str) -> Optional[str]:
+    """Keep ordered text/image parts separately from the searchable text projection.
+
+    Snapshots are content-addressed under the owning profile's state directory, so
+    a later overwrite/removal of the source cannot silently change an old turn.
+    Never put base64 payloads in SQLite or its FTS index.
+    """
+    parts = content.get("content") if _is_multimodal_tool_result(content) else content
+    if not isinstance(parts, list) or not any(isinstance(p, dict) and p.get("type") in _IMAGE_PART_TYPES for p in parts):
+        return None
+    store = Path(db_path).parent / "cache" / "session_images"
+    saved = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") not in _IMAGE_PART_TYPES:
+            if part.get("type") == "text":
+                saved.append({"type": "text", "text": part.get("text", "")})
+            continue
+        url = part.get("image_url")
+        url = url.get("url") if isinstance(url, dict) else url
+        if not url and isinstance(part.get("source"), dict):
+            source = part["source"]
+            if source.get("type") == "base64":
+                url = f"data:{source.get('media_type', 'image/png')};base64,{source.get('data', '')}"
+        try:
+            if isinstance(url, str) and url.startswith("data:"):
+                header, encoded = url.split(",", 1)
+                if ";base64" not in header:
+                    raise ValueError("non-base64 data URL")
+                image = base64.b64decode(encoded, validate=True)
+                mime = header[5:].split(";", 1)[0]
+            elif isinstance(url, str) and urlparse(url).scheme in {"http", "https"}:
+                # Remote attachments are already durable references.  Do not treat
+                # an HTTP URL as a filesystem path and turn a usable image into a
+                # missing one during replay.
+                saved.append({"type": "image_ref", "url": url})
+                continue
+            elif isinstance(url, str):
+                path = Path(unquote(urlparse(url).path)) if url.startswith("file://") else Path(url)
+                image = path.read_bytes()
+                mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}.get(path.suffix.lower(), "image/png")
+            else:
+                raise ValueError("missing image source")
+            if not image:
+                raise ValueError("empty image")
+            digest = hashlib.sha256(image).hexdigest()
+            target = store / digest
+            store.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                target.write_bytes(image)
+            saved.append({"type": "image_url", "sha256": digest, "mime": mime})
+        except (OSError, ValueError, binascii.Error) as exc:
+            logger.warning("Could not retain session image: %s", exc)
+            saved.append({"type": "image_unavailable"})
+    return json.dumps(saved) if saved else None
 
 
 def _persist_lock(agent):
@@ -224,6 +286,9 @@ def _db_flush_row(agent, msg: Dict, is_current_turn_user: bool) -> Dict[str, Any
     # Key order is the divert-JSONL wire order (divert_session_transcript_jsonl).
     row = {
         "role": role, "content": _durable_content(content),
+        "image_refs": (_durable_image_parts(content, agent._session_db.db_path)
+                       if isinstance(content, list) or _is_multimodal_tool_result(content)
+                       else msg.get("image_refs")),
         "tool_name": msg.get("tool_name") or (msg.get("name") if role == "tool" else None),
         "tool_calls": msg["tool_calls"] if isinstance(msg.get("tool_calls"), list) else None,
         "tool_call_id": msg.get("tool_call_id"), "effect_disposition": msg.get("effect_disposition"),
