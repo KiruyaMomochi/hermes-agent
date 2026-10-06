@@ -409,6 +409,22 @@ def _has_compressed_summary_metadata(message: Any) -> bool:
     return isinstance(message, dict) and bool(message.get(COMPRESSED_SUMMARY_METADATA_KEY))
 
 
+def _is_length_continuation_nudge(message: Any) -> bool:
+    """Recognize replayed continuation nudges after their private tag was stripped."""
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    if message.get("_length_continuation_nudge"):
+        return True
+    content = message.get("content")
+    if not isinstance(content, str):
+        return False
+    text = content.strip()
+    return text in (
+        _LENGTH_CONTINUATION_OUTPUT_LIMIT, _LENGTH_CONTINUATION_NETWORK_STUB,
+        _LEGACY_LENGTH_CONTINUATION_NETWORK_STUB,
+    ) or text.startswith(_LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX)
+
+
 def _is_synthetic_compression_user_turn(message: Any) -> bool:
     """Recognize internal user-role rows by content marker (the store drops metadata)."""
     if not isinstance(message, dict) or message.get("role") != "user":
