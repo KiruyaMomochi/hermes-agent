@@ -253,3 +253,49 @@ class TestCompactionCheckpointCarrier:
         assert not AIAgent._is_thinking_only_assistant(
             msg, drop_codex_reasoning_items=False
         )
+
+
+# ---------------------------------------------------------------------------
+# Length-continuation nudge orphaned by a dropped thinking-only turn
+# ---------------------------------------------------------------------------
+
+
+class TestOrphanedLengthNudge:
+    """A relay can answer with thinking only and ``stop_reason=max_tokens``; the turn
+    loop then appends a continuation nudge. Replayed from SessionDB (tag stripped),
+    that nudge must not be glued onto the human's message once the thinking-only
+    turn is dropped."""
+
+    def _nudge(self):
+        from agent.conversation_loop import _LENGTH_CONTINUATION_OUTPUT_LIMIT
+        return {"role": "user", "content": _LENGTH_CONTINUATION_OUTPUT_LIMIT}
+
+    def test_replayed_history_drops_nudge_with_its_thinking_turn(self):
+        msgs = [
+            {"role": "user", "content": "出门了"},
+            {"role": "assistant", "content": "", "reasoning": "...", "finish_reason": "length"},
+            self._nudge(),
+            {"role": "assistant", "content": "去吧"},
+            {"role": "user", "content": "9786264455220"},
+        ]
+        out = AIAgent._drop_thinking_only_and_merge_users(msgs)
+        assert [m["role"] for m in out] == ["user", "assistant", "user"]
+        assert out[0]["content"] == "出门了"
+        assert all("[System:" not in str(m["content"]) for m in out)
+
+    def test_in_flight_continuation_ends_on_the_human_turn(self):
+        msgs = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "", "reasoning": "..."},
+            {**self._nudge(), "_length_continuation_nudge": True},
+        ]
+        out = AIAgent._drop_thinking_only_and_merge_users(msgs)
+        assert out == [{"role": "user", "content": "hi"}]
+
+    def test_nudge_after_visible_fragment_is_kept(self):
+        msgs = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "partial answer"},
+            self._nudge(),
+        ]
+        assert AIAgent._drop_thinking_only_and_merge_users(msgs) is msgs
