@@ -1252,14 +1252,26 @@ def drop_thinking_only_and_merge_users(
     ``drop_nudge_marker`` (#67321): user rows equal to the marker — the synthetic Codex
     continuation nudge — are dropped too once the turn has crossed to a non-Codex provider;
     doing it in this pass keeps alternation valid when the nudge sat between dropped
-    reasoning-only interims and a tool result rather than next to the user's message."""
+    reasoning-only interims and a tool result rather than next to the user's message.
+
+    A length-continuation nudge right after a dropped thinking-only turn goes with it: it
+    asks to continue a fragment that has no visible text, and once the turn is gone the
+    merge would glue it onto the human's next message on every replay."""
     if not messages:
         return messages
-    kept = [
-        m for m in messages
-        if not (drop_nudge_marker is not None and m.get("role") == "user" and m.get("content") == drop_nudge_marker)
-        and not _ra().AIAgent._is_thinking_only_assistant(m, drop_codex_reasoning_items=drop_codex_reasoning_items)
-    ]
+    from agent.conversation_loop import _is_length_continuation_nudge
+    kept = []
+    prev_dropped_thinking = False
+    for m in messages:
+        if drop_nudge_marker is not None and m.get("role") == "user" and m.get("content") == drop_nudge_marker:
+            continue
+        if _ra().AIAgent._is_thinking_only_assistant(m, drop_codex_reasoning_items=drop_codex_reasoning_items):
+            prev_dropped_thinking = True
+            continue
+        if prev_dropped_thinking and _is_length_continuation_nudge(m):
+            continue
+        prev_dropped_thinking = False
+        kept.append(m)
     dropped = len(messages) - len(kept)
     merged: List[Dict[str, Any]] = []
     merges = 0

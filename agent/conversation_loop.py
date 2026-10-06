@@ -935,6 +935,22 @@ _LEGACY_LENGTH_CONTINUATION_NETWORK_STUB = (
 _LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX = "[System: Your previous tool call "
 
 
+def _is_length_continuation_nudge(message: Any) -> bool:
+    """A user row holding a length-continuation nudge. Matched by content: SessionDB
+    projection strips the ``_length_continuation_nudge`` tag."""
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    if message.get("_length_continuation_nudge"):
+        return True
+    content = message.get("content")
+    if not isinstance(content, str):
+        return False
+    text = content.strip()
+    return text in (
+        _LENGTH_CONTINUATION_OUTPUT_LIMIT, _LENGTH_CONTINUATION_NETWORK_STUB, _LEGACY_LENGTH_CONTINUATION_NETWORK_STUB,
+    ) or text.startswith(_LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX)
+
+
 def _get_continuation_prompt(is_partial_stub: bool, dropped_tools: Optional[List[str]] = None) -> str:
     if is_partial_stub and dropped_tools:
         tool_list = ", ".join(dropped_tools[:3])
