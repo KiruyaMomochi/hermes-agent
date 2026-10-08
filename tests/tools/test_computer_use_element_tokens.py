@@ -4,6 +4,8 @@ Covers both driver generations: 0.21-era schemas that accept element_index besid
 0.3x+/0.5x strict schemas that accept only element_token (#134857, #135872)."""
 from __future__ import annotations
 
+import pytest
+
 
 class TestElementTokenAttachment:
     """Surface 6 (NousResearch/hermes-agent#47072): trycua/cua#1961 added
@@ -148,3 +150,29 @@ class TestElementTokenAttachment:
 
         # Stale 99 token is gone; only the two new tokens remain.
         assert backend._snapshot_tokens == {1: "snap2:1", 2: "snap2:2"}
+
+    @pytest.mark.parametrize("action,kwargs,tool", [
+        ("click", {"element": 5}, "click"),
+        ("scroll", {"direction": "down", "element": 5}, "scroll"),
+        ("set_value", {"value": "hello", "element": 5}, "set_value"),
+    ])
+    def test_token_only_driver_accepts_element_actions(self, action, kwargs, tool):
+        """A strict token-only schema must never receive the obsolete element_index."""
+        backend = self._backend_with_session({})
+        backend._snapshot_tokens = {5: "s00000001:5"}
+        backend._session.supports_input_property = lambda name, prop: prop == "element_token" and name == tool
+
+        def strict_call(name, args):
+            if name == tool and "element_index" in args:
+                return {"data": {"message": f"{name}: unknown argument element_index"},
+                        "structuredContent": {"code": "invalid_arguments"}, "isError": True}
+            return {"data": "ok", "structuredContent": None, "isError": False}
+
+        backend._session.call_tool.side_effect = strict_call
+        result = getattr(backend, action)(**kwargs)
+        assert result.ok, result.message
+        name, args = backend._session.call_tool.call_args.args
+        assert name == tool
+        assert args["element_token"] == "s00000001:5"
+        assert "element_index" not in args
+

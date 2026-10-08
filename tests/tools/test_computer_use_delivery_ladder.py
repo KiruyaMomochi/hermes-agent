@@ -363,3 +363,14 @@ def test_call_tool_restarts_a_dead_session(monkeypatch):
 
     sess.call_tool("click", {"pid": 1})
     assert started["count"] == 1, "dead session should have been restarted once"
+
+
+def test_is_closed_session_error_recognizes_mcp_connection_closed():
+    from tools.computer_use.cua_backend_session import _CuaDriverSession
+
+    class McpError(Exception):
+        pass
+
+    assert _CuaDriverSession._is_closed_session_error(McpError("Connection closed"))
+    assert not _CuaDriverSession._is_closed_session_error(McpError("unknown argument element_index"))
+

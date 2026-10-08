@@ -1,6 +1,8 @@
 """Profile-local tool text stays out of the shared definitions and child agents."""
 from types import SimpleNamespace
 
+import pytest
+
 from hermes_yaml import safe_dump
 
 from tools.registry import prompt_override
@@ -226,3 +228,38 @@ def test_tool_search_frame_override_keeps_live_listing(tmp_path, monkeypatch):
     assert "直接 `tool_describe`。" in fn["description"]
     assert fn["description"].endswith("- a: x\n- b: y")
     assert fn["parameters"]["properties"]["limit"]["description"] == "每次幾條"
+
+
+@pytest.mark.parametrize("replacement", ["Bounds {image_width}x{image_height}", ""])
+@pytest.mark.parametrize("mode", ["ax", "som"])
+def test_computer_use_bounds_hint_override_is_main_only(tmp_path, monkeypatch, replacement, mode):
+    import json
+    from agent.delegation_context import delegated_child_context
+    from tools.computer_use.backend import CaptureResult, UIElement
+    from tools.computer_use import tool as cu_tool
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(cu_tool, "_should_route_through_aux_vision", lambda: False)
+    monkeypatch.setattr(cu_tool, "_persist_capture_image", lambda cap: None)
+    cap = CaptureResult(mode=mode, width=8, height=8,
+        png_b64=("iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76L"
+                 "AAAADUlEQVR4nGNgGAUgAAABCAABgukLHQAAAABJRU5ErkJggg=="),
+        elements=[UIElement(index=0, role="section", bounds=(0, 48, 1296, 1917))])
+
+    def summary():
+        result = cu_tool._capture_response(cap)
+        return result["text_summary"] if isinstance(result, dict) else json.loads(result)["summary"]
+
+    original = summary()
+    assert "does not establish a scale factor" in original
+    (tmp_path / "prompt_overrides.yaml").write_text(safe_dump({"tool_results": {
+        "computer_use": {"bounds_note": replacement}}}))
+    overridden = summary()
+    assert "does not establish a scale factor" not in overridden
+    assert "estimated scale" not in overridden
+    if replacement:
+        assert "Bounds 8x8" in overridden
+    else:
+        assert "  ()" not in overridden
+    with delegated_child_context():
+        assert summary() == original

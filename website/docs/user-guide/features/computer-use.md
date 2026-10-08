@@ -349,6 +349,28 @@ Asking for the **desktop** instead targets the OS shell surface itself —
 wallpaper, desktop icons, taskbar — with its clickable elements, so requests
 like "open the Recycle Bin on my desktop" still work.
 
+### Capture coordinates and bounds hints
+
+Window captures in every mode, including `vision`, establish the driver's
+session-owned snapshot before subsequent pixel input. Use window screenshot
+pixels for `coordinate=` clicks, or prefer element indices. Accessibility
+bounds can include desktop offsets, window decorations, and off-screen scroll
+content; their extents do not establish a screenshot scale factor.
+
+To customize the bounds note, set `tool_results.computer_use.bounds_note` in
+the active profile's `prompt_overrides.yaml`. The template supports
+`{image_width}` and `{image_height}`. An empty string suppresses the entire
+bounds note in both text and image capture summaries:
+
+```yaml
+tool_results:
+  computer_use:
+    bounds_note: ""
+```
+
+This uses the existing tool-result override policy: ordinary delegated children
+keep the built-in wording rather than inheriting the parent's override.
+
 ## Provider compatibility
 
 | Provider | Vision? | Works? | Notes |

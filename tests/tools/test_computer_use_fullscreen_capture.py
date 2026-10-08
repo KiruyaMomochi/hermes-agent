@@ -27,7 +27,7 @@ _PNG_B64 = (
 
 class _FakeSession:
     """Records tool calls; serves get_config / set_config / get_desktop_state
-    and (for the desktop-shell path) list_windows / screenshot."""
+    and (for the desktop-shell path) list_windows / get_window_state."""
 
     def __init__(
         self,
@@ -42,6 +42,9 @@ class _FakeSession:
         self.capabilities_discovered = True
 
     def supports_input_value(self, tool: str, property_name: str, value: Any) -> bool:
+        return False
+
+    def supports_input_property(self, tool: str, property_name: str) -> bool:
         return False
 
     def _has_tool(self, name: str) -> bool:
@@ -76,7 +79,7 @@ class _FakeSession:
                 "structuredContent": {"windows": self._windows},
                 "isError": False,
             }
-        if name == "screenshot":
+        if name == "get_window_state":
             return {
                 "data": "",
                 "images": [_PNG_B64],

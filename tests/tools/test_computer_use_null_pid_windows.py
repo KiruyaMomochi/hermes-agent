@@ -77,7 +77,7 @@ class TestIngestWindows:
 
 def _backend_with_windows(raw_windows):
     """A CuaDriverBackend whose session returns `raw_windows` from
-    list_windows and a valid PNG from screenshot."""
+    list_windows and a valid PNG from get_window_state."""
     from tools.computer_use.cua_backend import CuaDriverBackend
 
     backend = CuaDriverBackend()
@@ -88,7 +88,7 @@ def _backend_with_windows(raw_windows):
     def _call_tool(name, args, *a, **k):
         if name == "list_windows":
             return {"structuredContent": {"windows": raw_windows}}
-        if name == "screenshot":
+        if name == "get_window_state":
             return {
                 "structuredContent": {
                     "screenshot_png_b64": _PNG_B64,
