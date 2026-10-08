@@ -2023,6 +2023,41 @@ class TestElementTokenAttachment:
         assert args["element_token"] == "s00000001:5"
 
 
+    @pytest.mark.parametrize("action,kwargs,tool", [
+        ("click", {"element": 5}, "click"),
+        ("scroll", {"direction": "down", "element": 5}, "scroll"),
+        ("set_value", {"value": "hello", "element": 5}, "set_value"),
+    ])
+    def test_token_only_driver_accepts_element_actions(self, action, kwargs, tool):
+        """A strict token-only schema must never receive the obsolete element_index."""
+        backend = self._backend_with_session({})
+        backend._snapshot_tokens = {5: "s00000001:5"}
+        backend._session.supports_input_property = lambda name, prop: prop == "element_token" and name == tool
+
+        def strict_call(name, args):
+            if name == tool and "element_index" in args:
+                return {"data": {"message": f"{name}: unknown argument element_index"},
+                        "structuredContent": {"code": "invalid_arguments"}, "isError": True}
+            return {"data": "ok", "structuredContent": None, "isError": False}
+
+        backend._session.call_tool.side_effect = strict_call
+        result = getattr(backend, action)(**kwargs)
+        assert result.ok, result.message
+        name, args = backend._session.call_tool.call_args.args
+        assert name == tool
+        assert args["element_token"] == "s00000001:5"
+        assert "element_index" not in args
+
+    def test_legacy_driver_keeps_element_index_with_token(self):
+        backend = self._backend_with_session({})
+        backend._snapshot_tokens = {5: "s00000001:5"}
+        backend._session.supports_input_property = lambda name, prop: name == "click" and prop in {
+            "element_index", "element_token"}
+        backend.click(element=5)
+        _, args = backend._session.call_tool.call_args.args
+        assert args["element_index"] == 5
+        assert args["element_token"] == "s00000001:5"
+
     def test_capture_refreshes_snapshot_tokens(self):
         """A fresh capture should overwrite any stale tokens from a
         previous snapshot — token cache invariant: only the latest
