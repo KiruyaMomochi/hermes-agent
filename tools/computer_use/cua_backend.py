@@ -413,6 +413,9 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
         if token and (self._session.supports_input_property(name, "element_token")
                       or self._session.supports_capability("accessibility.element_tokens", tool=name)):
             args["element_token"] = token
+            # Token-only action schemas reject the obsolete index; retain it when advertised for older drivers.
+            if not self._session.supports_input_property(name, "element_index"):
+                args.pop("element_index")
         if inject_session:  # setdefault preserves any explicit session a caller already supplied
             args.setdefault("session", self._session_id)
         try:
