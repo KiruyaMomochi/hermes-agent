@@ -57,6 +57,18 @@ def home_mode_unsafe(node: os.stat_result, path: Path) -> bool:
         return True
     if not mode & 0o020:
         return False
+    # Group-write the operator chose via HERMES_HOME_MODE (a home shared with another uid) is trusted.
+    # A kanban worker for another profile has the launch profile's .env stripped and never loads
+    # its own, so also read the setting from the home it is checking.
+    from agent.secret_scope import load_env_file
+    configured_mode = (os.environ.get("HERMES_HOME_MODE", "").strip()
+                       or load_env_file(path / ".env").get("HERMES_HOME_MODE", "").strip())
+    if configured_mode:
+        try:
+            if int(configured_mode, 8) == node.st_mode & 0o777:
+                return False
+        except ValueError:
+            pass
     # With an access ACL the group bits are the mask: a named user (setfacl u:other:rwx) may
     # hold write even though the owning group is private.
     if _may_have_access_acl(path):
