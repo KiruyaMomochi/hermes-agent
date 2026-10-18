@@ -499,13 +499,13 @@ def _secure_dir(path):
 
 
 def _secure_file(path):
-    """chmod a file 0600. Skipped when managed (activation sets 0640 group-readable) or in a
-    container (mounts often need broader permissions)."""
+    """Private file policy, honoring explicit shared homes, managed installs and containers."""
     if is_managed() or _container_or_chmod_skipped():
         return
+    from hermes_home_permissions import home_write_mode
     try:
         if os.path.exists(str(path)):
-            os.chmod(path, 0o600)
+            os.chmod(path, home_write_mode(path, 0o600))
     except (OSError, NotImplementedError):
         pass
 

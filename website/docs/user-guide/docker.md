@@ -1076,6 +1076,18 @@ docker run -d \
 
 Outside a container Hermes locks `HERMES_HOME` (and its `cron/`, `sessions/`, `logs/`, `memories/` subdirectories) to owner-only `0700` on every start. Inside a container it leaves directory modes alone, so a bind mount shared with a sibling container running as a different UID (a web UI, a permissions fixer) keeps whatever mode and ACLs you set on the host. To force a specific directory mode anyway, set `HERMES_HOME_MODE` (octal, e.g. `HERMES_HOME_MODE=0755`); it is applied in containers too.
 
+For an intentionally shared home, `HERMES_HOME_MODE=0770` (or `2770`) also opts its
+file writers into group sharing **when the home's actual permission bits match**.
+The central `hermes_home_permissions` policy retains the group/ACL mask on config,
+auth, vault keys, config backups and atomic home writes instead of clearing named-user
+ACL access with `chmod 0600`. New files need an inherited default ACL if the peer is
+a named user rather than a member of the owning group. This grants that peer access
+to credentials too: use only for mutually trusted accounts. Merely making a home
+group writable does not opt in; invalid, mismatched or world-writable modes do not
+enable sharing. Runtime socket/ownership guards remain private. An explicit process
+environment value takes precedence over the target home's `.env`, as for directory
+policy; otherwise each target home reads only its own `.env`.
+
 ### "Permission denied" on every `docker exec` (install dir locked to 0700)
 
 Images built before late August 2026 had a bug where writing a credential file directly under `/opt/hermes` restricted that directory to `0700`, locking the `hermes` user (UID 10000) out of the install tree. Every new `docker exec` then fails with `Permission denied`.

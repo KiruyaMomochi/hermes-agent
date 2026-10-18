@@ -190,8 +190,9 @@ def _check_env_file(should_fix: bool, f: Finding) -> None:
             env_path.parent.mkdir(parents=True, exist_ok=True)
             env_path.touch()
             # .env holds API keys — touch() obeys umask (commonly 0o022, world-readable); tighten explicitly.
+            from hermes_home_permissions import home_write_mode
             with warn_on_error(""):
-                os.chmod(str(env_path), 0o600)
+                os.chmod(str(env_path), home_write_mode(env_path, 0o600))
             check_ok(f"Created empty {_DHH}/.env")
             check_info("Run 'hermes setup' to configure API keys")
             f.fixed += 1

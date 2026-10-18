@@ -26,6 +26,23 @@ MEMORY_BLOCK_HEADERS = {
 ENTRY_DELIMITER = "\n§\n"
 
 
+def _memory_file_mode(path: Path) -> int | None:
+    """Share curated notes with the home's group, not traversal-only/world visitors.
+
+    Secret stores keep their separate 0600 policy. With no explicit sharing choice,
+    leave existing memory modes (including managed-install modes) intact.
+    """
+    from hermes_constants import get_configured_home_mode
+
+    configured = get_configured_home_mode(path.parent.parent)
+    if not configured:
+        return None
+    try:
+        return 0o600 | (int(configured, 8) & 0o060)
+    except ValueError:
+        return 0o600
+
+
 def _scan_memory_content(content: str) -> Optional[str]:
     """Error string if *content* matches injection/exfil patterns. Strict scope:
     memory enters the system prompt, so a poisoned entry persists across sessions."""
@@ -715,7 +732,8 @@ class MemoryStore:
         hold ``_file_lock`` (via ``_mutate``): a bare write from an earlier snapshot
         drops concurrent entries (#119668)."""
         try:
-            atomic_write_text(path, ENTRY_DELIMITER.join(entries), tmp_prefix=".mem_")
+            atomic_write_text(path, ENTRY_DELIMITER.join(entries), tmp_prefix=".mem_",
+                              preserve_mode=True, mode=_memory_file_mode(path))
         except OSError as e:
             raise RuntimeError(f"Failed to write memory file {path}: {e}")
 

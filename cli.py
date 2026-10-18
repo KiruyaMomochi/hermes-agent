@@ -783,8 +783,9 @@ def save_config_value(key_path: str, value: any) -> bool:
         mkdir_under_hermes_home(config_path.parent)
         from hermes_cli.config_backend import write_config_key
         write_config_key(config_path, key_path, value)
-        try:  # owner-only: config files contain API keys
-            os.chmod(config_path, 0o600)
+        from hermes_home_permissions import home_write_mode
+        try:  # private unless this home explicitly shares its ACL mask
+            os.chmod(config_path, home_write_mode(config_path, 0o600))
         except (OSError, NotImplementedError):
             pass
         return True

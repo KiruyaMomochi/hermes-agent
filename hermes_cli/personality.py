@@ -137,8 +137,9 @@ def persist_personality(value: Any) -> bool:
         from hermes_constants import mkdir_under_hermes_home
         mkdir_under_hermes_home(config_path.parent)
         write_config_key(config_path, "display.personality", name)
+        from hermes_home_permissions import home_write_mode
         try:
-            os.chmod(config_path, 0o600)
+            os.chmod(config_path, home_write_mode(config_path, 0o600))
         except (OSError, NotImplementedError):
             pass
         return True

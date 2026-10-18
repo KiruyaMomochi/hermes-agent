@@ -278,8 +278,9 @@ class VaultStore:
 
         self._ensure_dir()
         if self._key_path.exists():
+            from hermes_home_permissions import home_write_mode
             with suppress(OSError):
-                os.chmod(self._key_path, 0o600)
+                os.chmod(self._key_path, home_write_mode(self._key_path, 0o600))
             return self._key_path.read_bytes().strip()
         ref = kc.read_ref(self._keyref_path)
         if ref is not None:

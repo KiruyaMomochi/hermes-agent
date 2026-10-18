@@ -731,7 +731,7 @@ def profile_cli_selector() -> str:
     return f"-p {name} " if name and name != "default" else ""
 
 
-def secure_parent_dir(path: Path) -> None:
+def secure_parent_dir(path: Path, *, home: str | Path | None = None) -> None:
     """Chmod ``0o700`` on *path*'s parent, refusing ``/`` and top-level dirs (misresolved HERMES_HOME)."""
     parent = path.parent.resolve()
     if parent == Path("/") or len(parent.parts) < 3:
@@ -748,8 +748,9 @@ def secure_parent_dir(path: Path) -> None:
             "normally stored under the hermes home directory instead.", parent, _INSTALL_ROOT,
         )
         return
+    from hermes_home_permissions import home_write_mode
     with contextlib.suppress(OSError):
-        os.chmod(parent, 0o700)
+        os.chmod(parent, home_write_mode(parent, 0o700, home=home, directory=True))
 
 
 def _norm_home_path(path: str | None) -> str:
@@ -1025,6 +1026,22 @@ def _chown_to_hermes_uid(path) -> None:
         pass
 
 
+def get_configured_home_mode(home: str | Path | None = None) -> str:
+    """Operator's directory mode, including before startup loads the home's .env.
+
+    Read only the target home; do not load its secrets into the process environment.
+    An explicit environment value takes precedence, including an invalid value (callers
+    retain their own fail-closed parsing).
+    """
+    explicit = os.environ.get("HERMES_HOME_MODE", "").strip()
+    if explicit:
+        return explicit
+    from agent.secret_scope import load_env_file
+
+    base = Path(home) if home is not None else get_hermes_home()
+    return load_env_file(base / ".env").get("HERMES_HOME_MODE", "").strip()
+
+
 def apply_secure_dir_policy(path, *, home: str | Path | None = None) -> None:
     """Apply the canonical Hermes home-directory permission policy to *path*.
 
@@ -1038,15 +1055,15 @@ def apply_secure_dir_policy(path, *, home: str | Path | None = None) -> None:
     applied when those env vars are set (#34107).
 
     ``home`` (keyword-only: both arguments are path-likes) names the home whose managed-mode
-    marker is read, for callers that already resolved it; without it the effective home is
-    consulted.
+    marker and .env mode are read, for callers that already resolved it; without it the
+    effective home is consulted. The environment overrides the home's .env setting.
 
     Import-safe twin of ``hermes_cli.config._secure_dir`` (which delegates here), so callers
     outside the CLI package — like :func:`get_scratch_dir` — share one policy implementation.
     """
     if get_managed_system(home) is not None:
         return
-    explicit_mode = os.environ.get("HERMES_HOME_MODE", "").strip()
+    explicit_mode = get_configured_home_mode(home)
     if _container_or_chmod_skipped() and not explicit_mode:
         _chown_to_hermes_uid(path)
         return
@@ -1070,18 +1087,21 @@ def ensure_private_store(path: str | Path, *, home: str | Path | None = None) ->
 
     Managed installs (group-share by design, #77579) and containers / ``HERMES_SKIP_CHMOD``
     (mounts shared across UIDs) keep the inherited modes and get ``-1`` (inherit the umask): the
-    carve-outs ``hermes_cli.config._secure_file`` makes. ``HERMES_HOME_MODE`` is not applied: it
-    opens the home for traversal to a served subdirectory, never to a credential store.
+    carve-outs ``hermes_cli.config._secure_file`` makes. A verified group-writable shared home
+    retains its ACL mask here too and returns the matching child umask (0770 -> 0007). Traversal-only
+    modes (0701/0750) do not opt credential stores into sharing.
     """
     from hermes_dir_acl import make_user_dir
+    from hermes_home_permissions import home_write_mode
 
     private = get_managed_system(home) is None and not _container_or_chmod_skipped()
-    target = make_user_dir(path, mode=0o700 if private else 0o777, parents=True, exist_ok=True)
+    mode = home_write_mode(path, 0o700, home=home, directory=True)
+    target = make_user_dir(path, mode=mode if private else 0o777, parents=True, exist_ok=True)
     if not private:
         return -1
     with contextlib.suppress(OSError, NotImplementedError):
-        os.chmod(target, 0o700)
-    return 0o077
+        os.chmod(target, mode)
+    return 0o777 & ~mode
 
 
 def get_scratch_dir(home: str | Path | None = None, *, prune: bool = True) -> Path:

@@ -284,6 +284,35 @@ def test_home_mode_refuses_only_writes_another_user_can_make(tmp_path, monkeypat
 
 
 @pytest.mark.platforms("linux", "macos")
+def test_home_mode_trusts_explicit_shared_mode(tmp_path, monkeypatch):
+    import grp
+    import os
+    import pwd
+    home = tmp_path / 'home'
+    home.mkdir()
+    user = pwd.getpwuid(os.getuid())
+    monkeypatch.setattr(pwd, 'getpwall', lambda: [user])
+    shared = grp.struct_group(('users', 'x', user.pw_gid, [user.pw_name, 'someone-else']))
+    monkeypatch.setattr(grp, 'getgrgid', lambda _gid: shared)
+    home.chmod(0o770)
+    monkeypatch.setenv('HERMES_HOME_MODE', '0770')
+    assert home_mode_unsafe(home.lstat(), home) is False
+    monkeypatch.setenv('HERMES_HOME_MODE', '0750')
+    assert home_mode_unsafe(home.lstat(), home) is True
+    monkeypatch.setenv('HERMES_HOME_MODE', 'invalid')
+    assert home_mode_unsafe(home.lstat(), home) is True
+    monkeypatch.setenv('HERMES_HOME_MODE', '0777')
+    home.chmod(0o777)
+    assert home_mode_unsafe(home.lstat(), home) is True
+    home.chmod(0o770)
+    # A worker routed to this profile has HERMES_HOME_MODE stripped; the home's own .env still counts.
+    monkeypatch.delenv('HERMES_HOME_MODE')
+    assert home_mode_unsafe(home.lstat(), home) is True
+    (home / '.env').write_text('HERMES_HOME_MODE=0770\n')
+    assert home_mode_unsafe(home.lstat(), home) is False
+
+
+@pytest.mark.platforms("linux", "macos")
 def test_group_write_is_private_only_when_no_other_account_has_that_primary_group(tmp_path, monkeypatch):
     import grp
     import os

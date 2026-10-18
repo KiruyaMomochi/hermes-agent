@@ -773,22 +773,22 @@ def _load_auth_store(auth_file: Optional[Path] = None) -> dict[str, Any]:
     return _empty_auth_store()
 
 
-def _save_private_json(target: Path, data: Any, *, fsync_dir: bool = False, **dump_kwargs: Any) -> None:
-    """0600 credential JSON under a 0700 parent (``secure_parent_dir`` refuses ``/``, top-level dirs
-    and the install tree). ``atomic_json_write`` creates the temp file 0600 before any byte lands."""
+def _save_private_json(target: Path, data: Any, *, fsync_dir: bool = False,
+                       permission_home: Path | None = None, **dump_kwargs: Any) -> None:
+    """Private JSON; shared-home ACL mask is applied before any payload byte lands."""
     from hermes_constants import mkdir_under_hermes_home
     mkdir_under_hermes_home(target.parent)
-    secure_parent_dir(target)
-    atomic_json_write(target, data, mode=0o600, fsync_dir=fsync_dir, **dump_kwargs)
+    secure_parent_dir(target, home=permission_home)
+    atomic_json_write(target, data, mode=0o600, fsync_dir=fsync_dir,
+                      permission_home=permission_home, **dump_kwargs)
 
 
 def _save_auth_store(auth_store: dict[str, Any], target_path: Optional[Path] = None) -> Path:
-    """Atomically persist *auth_store* (0o600, parent tightened to 0o700) to the active store, or to
-    an explicit *target_path* (e.g. the global-root write-through for rotating xAI OAuth grants)."""
+    """Persist active auth or an explicit store (global-root OAuth write-through), honoring its home policy."""
     auth_file = target_path if target_path is not None else _auth_file_path()
     auth_store["version"] = AUTH_STORE_VERSION
     auth_store["updated_at"] = datetime.now(UTC).isoformat()
-    _save_private_json(auth_file, auth_store, fsync_dir=True)
+    _save_private_json(auth_file, auth_store, fsync_dir=True, permission_home=auth_file.parent)
     if target_path is not None:
         # A write-through to the global root must not be masked by the mtime memo: on coarse-mtime
         # filesystems a read-after-write in the same tick would keep serving the pre-write store.

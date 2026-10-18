@@ -1969,8 +1969,9 @@ def persist_model_selection(result: ModelSwitchResult, config_path: Any = None) 
         else:
             config["model"] = merged
         atomic_config_replace(path, config)
-    try:  # owner-only: config files contain API keys
-        os.chmod(path, 0o600)
+    from hermes_home_permissions import home_write_mode
+    try:  # retain the opted-in shared-home ACL mask
+        os.chmod(path, home_write_mode(path, 0o600))
     except (OSError, NotImplementedError):
         pass
 
