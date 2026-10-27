@@ -57,7 +57,9 @@ let
   # read-only LOAD overlapping the RW one, so ld.so faults on .dynamic and
   # node segfaults on start (NixOS/patchelf#674). Fixed upstream by #672, not
   # yet released; drop this once nixpkgs ships a patchelf that contains it.
-  patchelfFixed = patchelf.overrideAttrs (old: {
+  # The patch is written against 0.19 sources and does not apply to older
+  # patchelf (nixpkgs pins can still carry 0.15.2), so only apply it on 0.19+.
+  patchelfFixed = if lib.versionOlder patchelf.version "0.19" then patchelf else patchelf.overrideAttrs (old: {
     patches = (old.patches or [ ]) ++ [
       (fetchpatch {
         name = "patchelf-fix-executable-header-load-overlap.patch";
