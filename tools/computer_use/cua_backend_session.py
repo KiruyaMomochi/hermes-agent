@@ -390,6 +390,7 @@ class _CuaDriverSession:
         name, module = exc.__class__.__name__, getattr(exc.__class__, "__module__", "")
         return (name in {"ClosedResourceError", "BrokenResourceError", "EndOfStream"}
                 or (module.startswith("anyio") and "Resource" in name)
+                or (name == "McpError" and "Connection closed" in str(exc))
                 or isinstance(exc, (BrokenPipeError, EOFError)))
 
     @staticmethod
