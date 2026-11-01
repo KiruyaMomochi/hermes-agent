@@ -217,9 +217,20 @@ def _move_dir(src: Path, dest: Path) -> None:
     shutil.move(str(src), str(dest))
 
 
+def _copytree_writable(src: Path, dest: Path, **kwargs) -> None:
+    """copytree, then give the owner write on the copy (#101226).
+
+    copy2 carries the source mode, and a Nix/Homebrew bundled tree is 0555/0444, so the synced skill
+    could never be edited. The origin hash covers paths and bytes only, so the chmod is not an edit."""
+    shutil.copytree(src, dest, **kwargs)
+    for path in (dest, *dest.rglob("*")):
+        if not path.is_symlink():
+            path.chmod(path.stat().st_mode | 0o200)
+
+
 def _copy_dir(src: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(src, dest, ignore=_ignore_runtime_cache)
+    _copytree_writable(src, dest, ignore=_ignore_runtime_cache)
 
 
 def _recover_renamed_skill(st: "_SyncState", skill_name: str, dest: Path) -> Optional[str]:
@@ -335,7 +346,7 @@ def _replace_skill_dir(skill_src: Path, dest: Path) -> None:
         _rmtree_writable(backup)
     shutil.move(str(dest), str(backup))
     try:
-        shutil.copytree(skill_src, dest, ignore=_ignore_runtime_cache)
+        _copytree_writable(skill_src, dest, ignore=_ignore_runtime_cache)
     except OSError:
         if backup.exists():  # clear a partially-written dest so it can't shadow/block the restore
             if dest.exists():
