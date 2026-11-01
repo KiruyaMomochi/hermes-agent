@@ -114,8 +114,8 @@ def ensure_bundled_skill(name: str) -> dict:
         if dest.exists() and any(p.is_symlink() or is_junction(p) for p in dest.rglob("*")):
             raise ValueError("the leftover directory contains a symlink or junction")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(src, dest, ignore=_ignore_runtime_cache, dirs_exist_ok=True,
-                        copy_function=lambda s, d: d if os.path.lexists(d) else shutil.copy2(s, d))
+        ss._copytree_writable(src, dest, ignore=_ignore_runtime_cache, dirs_exist_ok=True,
+                              copy_function=lambda s, d: d if os.path.lexists(d) else shutil.copy2(s, d))
     except (OSError, ValueError) as e:
         return {"ok": False, "action": "not_restored", "path": dest,
                 "message": f"Could not copy the built-in skill '{name}' to {dest}: {e}"}
