@@ -62,6 +62,30 @@ class TestReadWriteManifest:
         assert stat.S_IMODE(manifest_file.stat().st_mode) == 0o660
 
 
+def test_copy_of_read_only_bundled_skill_is_editable(tmp_path):
+    """#101226: a Nix/Homebrew bundled tree is 0555/0444; the synced copy must still be editable,
+    and the chmod must not change the origin hash."""
+    from tools import skills_sync
+
+    src = tmp_path / "bundled" / "demo"
+    (src / "references").mkdir(parents=True)
+    (src / "SKILL.md").write_text("# Demo\n")
+    (src / "references" / "notes.md").write_text("n\n")
+    for path in (src / "SKILL.md", src / "references" / "notes.md"):
+        path.chmod(0o444)
+    for path in (src / "references", src):
+        path.chmod(0o555)
+    dest = tmp_path / "skills" / "demo"
+    try:
+        skills_sync._copy_dir(src, dest)
+        assert skills_sync.dir_hash(dest) == skills_sync.dir_hash(src)
+        (dest / "references" / "new.md").write_text("added\n")
+        (dest / "SKILL.md").write_text("# Edited\n")
+    finally:
+        for path in (src, src / "references"):
+            path.chmod(0o755)
+
+
 class TestDirHash:
     def test_hash_reflects_content_only(self, tmp_path):
         dir_a = tmp_path / "a"
