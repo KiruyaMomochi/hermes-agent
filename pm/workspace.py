@@ -132,6 +132,15 @@ def _copy_core_inputs(source: Path, destination: Path) -> None:
         target = destination / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(entry, target)
+    _make_owner_writable(destination)
+
+
+def _make_owner_writable(root: Path) -> None:
+    """copy2/copytree carry the source mode along; from a Nix store source the copy is 0444/0555 and
+    the pyproject.toml rewrite that follows every snapshot fails with EACCES."""
+    for path in (root, *root.rglob("*")):
+        if not path.is_symlink():
+            path.chmod(path.stat().st_mode | 0o200)
 
 
 def _generate_pyproject(plugin_dirs: list[Path] | Mapping[Path, Path], root: Path, *, source: Path,
@@ -609,6 +618,7 @@ def _workspace_member(plugin_dir: Path, root: Path, *, identity: Path, extras: I
         member = root / "plugin-sources" / key
         shutil.copytree(plugin_dir, member, symlinks=True,
                         ignore=_member_ignored)
+        _make_owner_writable(member)
         document = tomllib.loads(pyproject.read_text(encoding="utf-8-sig"))
         # uv identifies a workspace member by [project].name, so the same virtual
         # plugin enabled in two profiles would declare one name twice and fail
@@ -741,6 +751,7 @@ def lock_and_sync(
         # snapshotted members and their exact lock travel with the workspace.
         # Use the snapshot's exclusions: build/ may hold an in-tree backend.
         shutil.copytree(replay, root, symlinks=True, ignore=_member_ignored)
+        _make_owner_writable(root)
         # A generation recorded before the cutoff left the user's machine still carries it.
         manifest = root / "pyproject.toml"
         manifest.write_text(_without_release_age(manifest.read_text(encoding="utf-8-sig")), encoding="utf-8")

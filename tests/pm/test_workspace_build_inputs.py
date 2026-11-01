@@ -263,6 +263,49 @@ def test_member_uv_lock_travels_with_its_member(tmp_path):
     assert not (destination / "uv.lock").exists(), "the root lock is seeded by lock_and_sync, not copied"
 
 
+def test_snapshot_of_read_only_source_is_writable(tmp_path):
+    """A Nix store source is 0444/0555; the snapshot must still take the generated pyproject.toml."""
+    core = tmp_path / "core"
+    package = core / "pkg"
+    package.mkdir(parents=True)
+    (core / "pyproject.toml").write_text(
+        '[project]\nname="core"\nversion="1"\nrequires-python=">=3.11"\n'
+        '[tool.setuptools.packages.find]\ninclude=["pkg"]\n',
+        encoding="utf-8",
+    )
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    for path in (package / "__init__.py", core / "pyproject.toml"):
+        path.chmod(0o444)
+    package.chmod(0o555)
+    core.chmod(0o555)
+
+    destination = tmp_path / "stage"
+    try:
+        workspace._copy_core_inputs(core, destination)
+        (destination / "pyproject.toml").write_text("generated\n", encoding="utf-8")
+        (destination / "pkg" / "build-artifact").write_text("", encoding="utf-8")
+    finally:
+        core.chmod(0o755)
+        package.chmod(0o755)
+
+
+def test_read_only_plugin_member_takes_its_rewritten_pyproject(tmp_path):
+    """A plugin shipped from the Nix store is 0444/0555; its workspace member gets a rewritten pyproject."""
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    (plugin / "pyproject.toml").write_text(
+        '[project]\nname="demo-plugin"\nrequires-python=">=3.11"\ndependencies=[]\n', encoding="utf-8")
+    (plugin / "pyproject.toml").chmod(0o444)
+    plugin.chmod(0o555)
+    root = tmp_path / "root"
+    root.mkdir()
+    try:
+        member = workspace._workspace_member(plugin, root, identity=plugin)
+        assert 'version = "0.0.0"' in (member / "pyproject.toml").read_text(encoding="utf-8")
+    finally:
+        plugin.chmod(0o755)
+
+
 def test_nested_dist_travels_but_root_dist_stays_out(tmp_path):
     """Bundled dashboard plugins ship a tracked dashboard/dist/ the snapshot's code serves."""
     core = tmp_path / "core"
