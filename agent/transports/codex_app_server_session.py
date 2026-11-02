@@ -150,7 +150,8 @@ def _build_turn_input(user_input: Any) -> tuple[list[dict], str]:
                 images.append(mapped)
     text = "\n\n".join(t for t in texts if t).strip()
     if not text and images:
-        text = "What do you see in this image?"
+        from agent.prompt_builder import IMAGE_ONLY_CAPTION
+        text = IMAGE_ONLY_CAPTION
     items: list[dict] = [{"type": "text", "text": text}] if text or not images else []
     return items + images, text
 

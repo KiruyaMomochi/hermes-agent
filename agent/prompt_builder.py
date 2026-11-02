@@ -272,6 +272,9 @@ SESSION_SEARCH_GUIDANCE = (
 # (agent/context_compressor_tail.py::with_skill_safety_rule): fresh sessions no longer pay for it.
 SKILLS_GUIDANCE = "When you work out a non-trivial workflow, record it with skill_manage for future reuse."
 
+# Text sent in place of the caption when the user attaches images with no text.
+IMAGE_ONLY_CAPTION = "What do you see in this image?"
+
 # Header/footer around the <available_skills> index. Module-level so prompt_overrides.yaml can replace them.
 # ``{basic_tools}`` is substituted at render time ("web_search or terminal", or "terminal" without web tools).
 SKILLS_INDEX_HEADER = (
