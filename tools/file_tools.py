@@ -1318,6 +1318,10 @@ SEARCH_FILES_SCHEMA = {
 }
 
 
+from tools.file_skill_advisory import with_skill_advisory
+
+
+@with_skill_advisory
 def _handle_read_file(args, **kw):
     tid = kw.get("task_id") or "default"
     # Models trained on other harnesses emit ``file_path``; without this the empty
@@ -1326,6 +1330,7 @@ def _handle_read_file(args, **kw):
     return read_file_tool(path=path, offset=args.get("offset", 1), limit=args.get("limit", DEFAULT_READ_LIMIT), task_id=tid)
 
 
+@with_skill_advisory
 def _handle_write_file(args, **kw):
     tid = kw.get("task_id") or "default"
     if not args.get("path") or not isinstance(args.get("path"), str):
@@ -1363,6 +1368,7 @@ def _owned(owner: str, fn, **call_kwargs):
         return fn(**call_kwargs)
 
 
+@with_skill_advisory
 def _handle_patch(args, **kw):
     from hermes_cli.observability.shared_metrics_harness import record_file_edit
 
@@ -1377,6 +1383,7 @@ def _handle_patch(args, **kw):
     ))
 
 
+@with_skill_advisory
 def _handle_search_files(args, **kw):
     tid = kw.get("task_id") or "default"
     target_map = {"grep": "content", "find": "files"}
