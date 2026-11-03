@@ -134,6 +134,35 @@ metadata:
 
 **Use case for `requires_*`:** Create a skill that only makes sense when certain tools are present. For example, a web scraping workflow skill with `requires_toolsets: [web]` won't clutter the prompt when web tools are disabled.
 
+### File-path coverage (`covers`)
+
+An optional **top-level** frontmatter field associates a skill with files:
+
+```yaml
+name: nix-infra
+covers: ["**/*.nix", "**/flake.lock"]
+```
+
+Patterns are case-sensitive Git-style globs (`*`, `**`, `?`, `[...]`),
+relative to the active workspace or either local agent user's home
+(`Path.home()` and `/home/kyaru`). For example, `.ssh/config` matches that
+home's SSH config. Absolute patterns and `..` traversal are ignored; files
+outside these roots do not match. A scalar pattern is also accepted.
+
+After successful `read_file`, `write_file`, `patch`, or `search_files` calls,
+the JSON result can include an `_skill_advisory` line:
+
+```text
+Relevant skills available: nix-infra. Load one with `skill_view` if applicable.
+```
+
+The normal skill catalog controls visibility, project trust, name precedence,
+and profile isolation. Tool requirements also apply. At most five skills are
+suggested per call, with repeated hints suppressed for the calling session.
+Hints never load skills, change the system prompt, inspect file contents, or
+parse terminal commands. Skill-manager edits refresh coverage immediately;
+external in-place edits follow the catalog's normal cache expiry.
+
 ### Environment Variable Requirements
 
 Skills can declare environment variables they need. When a skill is loaded via `skill_view`, its required vars are automatically registered for passthrough into sandboxed execution environments (terminal, execute_code).
