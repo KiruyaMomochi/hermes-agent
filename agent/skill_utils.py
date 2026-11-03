@@ -88,7 +88,31 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
             if ":" in line:
                 key, value = line.split(":", 1)
                 frontmatter[key.strip()] = value.strip()
+        frontmatter.pop("covers", None)
+    if "covers" in frontmatter:
+        frontmatter["covers"] = normalize_covers(frontmatter["covers"])
     return frontmatter, body
+
+
+def normalize_covers(value: Any) -> list[str]:
+    """Relative Git-style coverage globs; malformed metadata makes no associations."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    patterns = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        pattern = item.strip().replace("\\", "/")
+        if (not pattern or pattern.startswith(("/", "~"))
+                or (len(pattern) > 1 and pattern[1] == ":")
+                or ".." in pattern.split("/")):
+            continue
+        pattern = "/".join(p for p in pattern.split("/") if p not in ("", "."))
+        if pattern and pattern not in patterns:
+            patterns.append(pattern)
+    return patterns
 
 
 def skill_matches_platform_list(platforms: Any) -> bool:

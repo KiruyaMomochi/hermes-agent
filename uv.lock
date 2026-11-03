@@ -2698,7 +2698,7 @@ requires-dist = [
     { name = "opentelemetry-sdk", marker = "extra == 'otlp'", specifier = "==1.45.1" },
     { name = "packaging", marker = "python_full_version >= '3.14'", specifier = "==26.3" },
     { name = "parallel-web", marker = "extra == 'parallel-web'", specifier = "==0.6.0" },
-    { name = "pathspec", marker = "python_full_version >= '3.14'", specifier = "==1.1.1" },
+    { name = "pathspec", specifier = "==1.1.1" },
     { name = "pdfplumber", marker = "extra == 'documents-pdf'", specifier = "==0.11.10" },
     { name = "pilk", marker = "extra == 'silk'", specifier = "==0.2.4" },
     { name = "pillow", marker = "python_full_version >= '3.14'", specifier = "==13.0.0" },
