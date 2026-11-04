@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from agent.conversation_compression import recover_rotated_compression_session
 from agent.iteration_budget import IterationBudget
-from agent.memory_context import build_memory_context_block, sanitize_context
+from agent.memory_context import build_memory_context_block, build_memory_tool_messages, sanitize_context
 from agent.memory_provider import is_trivial_prompt
 from agent.message_content import flatten_message_text
 from agent.lsp.deferred import forward_to_agent as forward_lsp_verdicts
@@ -1384,18 +1384,24 @@ def build_turn_context(
     if not plugin_block_message:
         _maybe_title_session_at_turn_start(agent, messages, title_user_message)
 
+    # Decide once per turn; synthetic recall never enters the durable user content.
+    agent._memory_tool_messages = build_memory_tool_messages(
+        agent, ext_prefetch_cache, _memory_query_text(original_user_message)
+    )
+    text_recall = "" if agent._memory_tool_messages else ext_prefetch_cache
+
     # Sidecar skipped for codex_app_server/MoA; list content carries its context as a part in every mode.
     if 0 <= current_turn_user_idx < len(messages) and messages[current_turn_user_idx].get("role") == "user":
         if plugin_block_message:
             _withhold_blocked_prompt(agent, messages[current_turn_user_idx], original_user_message)
         elif isinstance(messages[current_turn_user_idx].get("content"), list):
             _append_multimodal_context(
-                agent, messages[current_turn_user_idx], ext_prefetch_cache, plugin_user_context,
+                agent, messages[current_turn_user_idx], text_recall, plugin_user_context,
                 preflight_compressed=compaction.compressed,
             )
         elif not moa_active and getattr(agent, "api_mode", None) != "codex_app_server":
             _stamp_api_content_sidecar(
-                agent, messages, current_turn_user_idx, ext_prefetch_cache,
+                agent, messages, current_turn_user_idx, text_recall,
                 plugin_user_context, preflight_compressed=compaction.compressed,
             )
 
@@ -1450,6 +1456,7 @@ def build_api_messages(
 
     has_current = isinstance(current_turn_user_idx, int) and 0 <= current_turn_user_idx < len(messages)
     current_turn_message = messages[current_turn_user_idx] if has_current else None
+    recall_messages = getattr(agent, "_memory_tool_messages", []) if ext_prefetch_cache else []
 
     # Replay consumers canonicalize the persisted prefix on read; the request copy must
     # carry the same bytes or a resume diverges mid-prefix. Only the rows BEFORE this
@@ -1491,7 +1498,7 @@ def build_api_messages(
             else:
                 # Callers that bypass the prologue stamping: compose live.
                 _composed = compose_user_api_content(
-                    api_msg.get("content", ""), ext_prefetch_cache, plugin_user_context
+                    api_msg.get("content", ""), "" if recall_messages else ext_prefetch_cache, plugin_user_context
                 )
                 if _composed is not None:
                     api_msg["content"] = _composed
@@ -1527,6 +1534,8 @@ def build_api_messages(
         # 'reasoning_details' is shaped by the replay policy above on chat_completions and
         # left intact for the native adapters (anthropic/bedrock rebuild signed blocks from it).
         api_messages.append(api_msg)
+        if msg is current_turn_message:
+            api_messages.extend(_clone_message_for_send(m) for m in recall_messages)
 
     # Rows rebuilt from the session DB carry ``[screenshot]`` lines: re-attach the newest retained
     # images on this wire copy (vision.replay_recent_images; native image input only).
