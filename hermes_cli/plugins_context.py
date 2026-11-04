@@ -411,11 +411,30 @@ class PluginContext(PluginCapabilityCtxMixin):
         from hermes_cli.plugin_session import context_surface
         return context_surface(self._manager)
 
+    def session_route(self) -> dict:
+        """JSON-safe identity of the calling conversation, or {} outside a bound session."""
+        from gateway.session_context import bound_session_key, get_session_env
+        key = bound_session_key()
+        if not key:
+            return {}
+        return {"session_key": key, **{
+            field: get_session_env(variable, "") for field, variable in (
+                ("platform", "HERMES_SESSION_PLATFORM"), ("chat_id", "HERMES_SESSION_CHAT_ID"),
+                ("thread_id", "HERMES_SESSION_THREAD_ID"), ("session_id", "HERMES_SESSION_ID"))}}
+
     def post_message(self, text: str) -> Any:
         """Post *text* into the session bound to this call; the handle's ``edit(text)`` updates it in
         place. Never raises (``ok=False`` + ``error`` with no conversation): ``plugin_messages.py``."""
         from hermes_cli.plugin_messages import post
         return post(self, text)
+
+    def delete_message(self, message_id: str) -> dict:
+        """Delete in the calling conversation; the caller selects a bot-owned message.
+
+        Returns {ok, message_id} or {ok: False, error}; never falls back to posting.
+        """
+        from hermes_cli.plugin_messages import delete
+        return delete(self, str(message_id))
 
     async def apost_message(self, text: str) -> Any:
         """``post_message`` for async code on the gateway loop (edit with ``await handle.aedit``)."""

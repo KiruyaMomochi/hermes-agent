@@ -2655,6 +2655,10 @@ class BasePlatformAdapter(ABC):
         when content is unchanged."""
         return SendResult(success=False, error="Not supported")
 
+    def message_is_deleted(self, chat_id: str, message_id: str) -> bool:
+        """Whether this process deliberately removed the bubble (never re-publish it)."""
+        return False
+
     async def delete_message(self, chat_id: str, message_id: str) -> bool:
         """Delete a sent message; True on success (platforms without a deletion API return False and
         callers leave it). Used by the stream consumer's fresh-final cleanup to remove stale

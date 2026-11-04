@@ -1387,6 +1387,25 @@ def register(ctx):
 
 ---
 
+### `gateway_outbound_message` (local fork)
+
+Confirmed Telegram bubble receipts: `platform`, `chat_id`, `thread_id`,
+`message_id`, `text`, `operation` (`sent`, `edited`, `deleted`). Each split/overflow
+bubble fires separately; successful edits update the same ID. Drafts have no ID
+and do not fire. Native media uses `text` = `[kind] caption`; albums fire once per
+returned item ID. Control prompts are not included. Callbacks are
+observer-only and run under the outbound delivery's profile scope; no bot client
+or adapter is exposed. Edit/delete receipts omit thread identity; join them to
+the original send by `(chat_id, message_id)`. Deleted receipts carry empty text.
+
+`ctx.session_route()` returns the current bound conversation's `session_key`,
+`platform`, `chat_id`, `thread_id`, `session_id`, or `{}` outside a session.
+`ctx.delete_message(message_id)` deletes in that conversation using its delivery
+adapter, subject to the same profile ownership checks as `ctx.post_message`.
+It returns `{ok: true, message_id}` only on transport-confirmed deletion, otherwise
+`{ok: false, error}`; there is no send fallback. Call it from a synchronous tool
+handler, not the gateway event loop. The plugin must select a bot-owned ID.
+
 ### `gateway_platform_event`
 
 Fires for supported platform-native events only **after** the gateway's normal, profile-scoped authorization check succeeds. The callback receives plain dictionaries; raw SDK objects, adapter handles, bot clients, and callback contexts are never part of this stable contract.

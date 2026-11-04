@@ -182,6 +182,7 @@ _MEDIA_KIND_KEYS = {
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
 from plugins.platforms.telegram.telegram_entities import expand_link_entities
 from plugins.platforms.telegram.telegram_held_inbound import TelegramHeldInboundMixin
+from plugins.platforms.telegram.telegram_message_events import observe_message
 from plugins.platforms.telegram.telegram_ids import normalize_telegram_chat_id, parse_send_target, parse_telegram_message_id
 from plugins.platforms.telegram.telegram_resolved_prompt import edit_keeping_prompt
 from plugins.platforms.telegram.telegram_topic_transfer import TopicTransferFn, apply_root_dm_topic_transfer
@@ -1562,6 +1563,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             message_id = getattr(msg, "message_id", None)
         if message_id is not None:
             await self._record_rich_sent(chat_id, message_id, content)
+            observe_message(chat_id, message_id, content, thread_id=thread_id)
         return SendResult(success=True, message_id=str(message_id) if message_id is not None else None)
 
     def _rich_payload_base(self, chat_id: str, content: str) -> dict[str, Any]:
@@ -1601,6 +1603,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             return self._rich_transient_result(exc, "rich editMessageText")
         # Mirror the fresh-send index: a streamed final finalized via edit is otherwise never recorded.
         await self._record_rich_sent(chat_id, message_id, content)
+        observe_message(chat_id, message_id, content, operation="edited")
         return SendResult(success=True, message_id=message_id)
 
     def _should_attempt_rich_draft(self, content: str) -> bool:
@@ -3866,6 +3869,10 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
                 return self._with_partial_send(outcome, chunks[len(delivered) - prior:], delivered)
             msg, used_thread_fallback = outcome
             delivered.append(str(msg.message_id))
+            visible_text = getattr(msg, "text", None)
+            observe_message(chat_id, msg.message_id,
+                            visible_text if isinstance(visible_text, str) else _strip_mdv2(chunk),
+                            thread_id=thread_id)
         await self._retrigger_typing(chat_id, metadata)
         return SendResult(
             success=True, message_id=delivered[0] if delivered else None,
@@ -3948,6 +3955,10 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
             kwargs["parse_mode"] = parse_mode
         await _await_with_thread_deadline(
             self._bot.edit_message_text(**kwargs), timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
+        observe_message(chat_id, message_id, _strip_mdv2(text) if parse_mode else text, operation="edited")
+
+    def message_is_deleted(self, chat_id: str, message_id: str) -> bool:
+        return (str(chat_id), str(message_id)) in getattr(self, "_recalled_message_ids", set())
 
     async def _edit_markdown_or_plain(self, chat_id: str, message_id: str, formatted: str, plain: str, warn_fmt: str) -> bool:
         """MarkdownV2 edit with plain-text fallback. Returns True on a "not modified" no-op (caller may
@@ -3971,6 +3982,9 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         continuations, and return the final chunk's id as the next edit target."""
         if not self._bot:
             return SendResult(success=False, error="Not connected")
+        if self.message_is_deleted(chat_id, message_id):
+            # A tool can recall a preview while the turn still owns its edit target.
+            return SendResult(success=True, message_id=message_id, raw_response={"skipped": True})
         # Shared per-chat budget (#116312): an interim (preview) edit is SKIPPED when the slot is busy —
         # the text it would show is shown by the next edit anyway, so a burst of edits can't trip flood
         # control. A final edit is never gated (the completed answer is always delivered). Sends wait for
@@ -4184,6 +4198,7 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
                         "continuation_message_ids": tuple(continuation_ids)},
                     continuation_message_ids=tuple(continuation_ids))
             new_id = str(getattr(sent_msg, "message_id", "")) or prev_id
+            observe_message(chat_id, new_id, chunk, thread_id=thread_id)
             continuation_ids.append(new_id)
             delivered_chunks.append(chunk)
             prev_id = new_id
@@ -4202,7 +4217,13 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         if not self._bot:
             return False
         try:
-            await self._bot.delete_message(chat_id=normalize_telegram_chat_id(chat_id), message_id=int(message_id))
+            deleted = await self._bot.delete_message(chat_id=normalize_telegram_chat_id(chat_id), message_id=int(message_id))
+            if not deleted:
+                return False
+            if not hasattr(self, "_recalled_message_ids"):
+                self._recalled_message_ids = set()
+            self._recalled_message_ids.add((str(chat_id), str(message_id)))
+            observe_message(chat_id, message_id, "", operation="deleted")
             return True
         except Exception as e:
             logger.debug("[%s] Failed to delete Telegram message %s: %s", self.name, message_id, _redact_telegram_error_text(e))
@@ -5286,8 +5307,11 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
         reset_media: Optional[Any] = None, **media_kwargs: Any) -> Any:
         """Send one native media payload with thread routing + DM-topic anchor retry."""
         reply_to_id, kwargs = self._media_send_kwargs(chat_id, reply_to, metadata)
-        return await self._send_with_dm_topic_reply_anchor_retry(
+        message = await self._send_with_dm_topic_reply_anchor_retry(
             send_fn, {**kwargs, **media_kwargs}, metadata, reply_to_id, media_label, reset_media=reset_media)
+        observe_message(chat_id, message.message_id, f"[{media_label}] {media_kwargs.get('caption') or ''}".rstrip(),
+                        thread_id=self._metadata_thread_id(metadata))
+        return message
 
     @staticmethod
     def _caption_1024(caption: Optional[str]) -> Optional[str]:
@@ -5431,9 +5455,12 @@ class TelegramAdapter(TelegramHeldInboundMixin, TelegramTopicRoutingMixin, BaseP
                         with contextlib.suppress(Exception):
                             fh.seek(0)
 
-                await self._send_with_dm_topic_reply_anchor_retry(
+                messages = await self._send_with_dm_topic_reply_anchor_retry(
                     self._bot.send_media_group, {**send_kwargs, "media": media}, metadata, reply_to_id,
                     "media group", reset_media=_reset_opened_files)
+                for message, photo in zip(messages, media):
+                    observe_message(chat_id, message.message_id, f"[photo] {photo.caption or ''}".rstrip(),
+                                    thread_id=self._metadata_thread_id(metadata))
                 delivered = True
             except Exception as e:
                 logger.warning(

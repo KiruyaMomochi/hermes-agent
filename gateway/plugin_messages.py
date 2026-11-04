@@ -144,6 +144,20 @@ async def post(target: PostTarget, text: str, *, plugin_id: str) -> dict:
     return result
 
 
+async def delete(target: PostTarget, message_id: str, *, plugin_id: str) -> dict:
+    """Delete only in the resolved conversation, with no fresh-send fallback."""
+    if target.live is not None or not callable(getattr(target.adapter, "delete_message", None)):
+        return _err("delete_unsupported")
+    try:
+        deleted = await target.adapter.delete_message(target.chat_id, message_id)
+    except Exception:
+        logger.warning("plugin_message plugin=%s op=delete raised", plugin_id, exc_info=True)
+        return _err("delete_failed")
+    if not deleted:
+        return _err("delete_failed")
+    return {"ok": True, "message_id": message_id}
+
+
 async def edit(target: PostTarget, message_id: Optional[str], text: str, *, plugin_id: str) -> dict:
     """Edit *message_id* in place; a surface that cannot edit gets a fresh message (``fallback``)."""
     result: dict

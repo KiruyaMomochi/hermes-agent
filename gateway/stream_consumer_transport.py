@@ -505,6 +505,11 @@ class StreamTransportMixin:
 
     async def _edit_existing(self, text: str, *, finalize: bool, is_turn_final: bool) -> bool:
         """Edit the live preview (or replace it via fresh-final when finalizing)."""
+        if self.adapter.message_is_deleted(self.chat_id, self._message_id) is True:
+            # A deliberate recall is not an edit failure: neither reconciliation nor
+            # rich fresh-final replacement may publish that bubble again.
+            self._last_sent_text = text
+            return True
         # REQUIRES_EDIT_FINALIZE adapters need the finalize=True edit even when
         # unchanged; everyone else short-circuits.
         if text == self._last_sent_text and not (finalize and self._adapter_requires_finalize):
