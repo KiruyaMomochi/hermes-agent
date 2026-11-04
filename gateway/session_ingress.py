@@ -15,6 +15,7 @@ from hermes_state_runtime import RuntimeStoreError
 logger = logging.getLogger(__name__)
 
 admission_author = ContextVar('admission_author', default=None)
+GATEWAY_TURN_AUTHOR = {'id': 'hermes:gateway', 'name': 'Hermes gateway', 'is_bot': True}
 executing_admission = ContextVar('executing_admission', default=False)
 # The live session while the executing turn is one its viewer submitted (``is_viewer_input``), else None.
 viewer_turn: ContextVar = ContextVar('viewer_turn', default=None)
@@ -323,7 +324,12 @@ async def execute_admission(authority, ref, row):
         # its session must not move it onto the fresh conversation (main's /new cancelled its task).
         event._claimed_owner = (ref.session_id, row['generation'])
     author = event.metadata.get('turn_author')
-    author_token = admission_author.set(author if author is not None else row_turn_author(local_policy, row))
+    if author is None:
+        author = row_turn_author(local_policy, row)
+    if author is None and event.internal:
+        # Notifications ride the chat's source, so without this they'd be filed under its human.
+        author = GATEWAY_TURN_AUTHOR
+    author_token = admission_author.set(author)
     from gateway.session_operator import is_viewer_input
     viewer_token = viewer_turn.set(live if is_viewer_input(row) else None)
     api_token = api_execution.set(None)
