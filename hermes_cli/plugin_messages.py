@@ -193,3 +193,25 @@ def post(ctx: Any, text: str) -> PluginMessage:
     if handle._target is None and not handle.pending:
         handle.result = result
     return handle
+
+
+def delete(ctx: Any, message_id: str) -> dict:
+    """Resolve the same profile-owned conversation as post, then delete on its transport."""
+    from gateway.plugin_messages import bound_route
+    from gateway.session_context import bound_session_key
+    session_key, route = bound_session_key(), bound_route()
+    if not session_key:
+        return _err("no_conversation", _NO_SESSION)
+    handle = PluginMessage(ctx.plugin_id, None, _err("timeout"))
+
+    async def _delete():
+        from gateway import plugin_messages
+        runner, _loop = _gateway_loop()
+        target, refusal = await asyncio.to_thread(
+            plugin_messages.resolve, runner, session_key=session_key, route=route,
+            plugin_home=ctx._manager.home_path, plugin_id=ctx.plugin_id)
+        if target is None:
+            return refusal
+        return await plugin_messages.delete(target, message_id, plugin_id=ctx.plugin_id)
+
+    return _run_on_gateway_loop(_delete(), handle)

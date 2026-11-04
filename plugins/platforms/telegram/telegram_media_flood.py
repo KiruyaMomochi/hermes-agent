@@ -107,9 +107,13 @@ class TelegramMediaFloodMixin:
         from plugins.platforms.telegram.adapter import _MEDIA_SEND_DEADLINE, _MEDIA_SEND_READ_TIMEOUT
         budget, deadline = scaled_budgets(media_sources(media_kwargs), _MEDIA_SEND_DEADLINE, _MEDIA_SEND_READ_TIMEOUT)  # #133093
         _, kwargs = self._media_send_kwargs(chat_id, reply_to, metadata)
-        return await send_media_retrying(lambda: self._send_with_dm_topic_reply_anchor_retry(
+        message = await send_media_retrying(lambda: self._send_with_dm_topic_reply_anchor_retry(
             send_fn, {**kwargs, **budget, **media_kwargs}, metadata, media_label, reset_media=reset_media,
             deadline=deadline), reset_media, media_label)
+        from plugins.platforms.telegram.telegram_message_events import observe_message
+        observe_message(chat_id, message.message_id, f"[{media_label}] {media_kwargs.get('caption') or ''}".rstrip(),
+                        thread_id=self._metadata_thread_id(metadata))
+        return message
 
     async def _send_local_file(
         self, label: str, path: str, chat_id, reply_to, metadata, media_key: str, build_kwargs, on_error,

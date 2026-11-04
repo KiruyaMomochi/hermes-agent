@@ -181,6 +181,7 @@ from plugins.platforms.telegram.telegram_audio_meta import (
 from plugins.platforms.telegram.telegram_dm_topic_send import dead_topic_may_reroute, dead_topic_retry_kwargs, private_chat, topic_gone
 from plugins.platforms.telegram.telegram_entities import (
     addressing_sources, addressing_text, expand_link_entities, expand_quote_link_entities, rich_message_filter, rich_message_text)
+from plugins.platforms.telegram.telegram_message_events import observe_message
 from plugins.platforms.telegram.telegram_held_inbound import TelegramHeldInboundMixin
 from plugins.platforms.telegram.telegram_ingress import TelegramContactMixin
 from plugins.platforms.telegram.telegram_replacement import TelegramReplacementMixin
@@ -1423,6 +1424,7 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
             from plugins.platforms.telegram.telegram_send_errors import idless_send_result
             return idless_send_result(self.name, chat_id, "sendRichMessage")
         await self._record_sent_text(chat_id, message_id, content)
+        observe_message(chat_id, message_id, content, thread_id=thread_id)
         return SendResult(success=True, message_id=str(message_id))
 
     def _rich_payload_base(self, chat_id: str, content: str) -> dict[str, Any]:
@@ -1462,6 +1464,7 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
             return self._rich_transient_result(exc, "rich editMessageText")
         # Mirror the fresh-send index: a streamed final finalized via edit is otherwise never recorded.
         await self._record_sent_text(chat_id, message_id, content)
+        observe_message(chat_id, message_id, content, operation="edited")
         return SendResult(success=True, message_id=message_id)
 
     def _should_attempt_rich_draft(self, content: str) -> bool:
@@ -3525,6 +3528,10 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
             delivered.append(str(msg.message_id))
             # Telegram echoes no body in ``reply_to_message``: a later quote-reply resolves only here.
             await self._record_sent_text(chat_id, msg.message_id, quotable_text(chunk, mdv2=True))
+            visible_text = getattr(msg, "text", None)
+            observe_message(chat_id, msg.message_id,
+                            visible_text if isinstance(visible_text, str) else _strip_mdv2(chunk),
+                            thread_id=thread_id)
         await self._retrigger_typing(chat_id, metadata)
         return SendResult(
             success=True, message_id=delivered[0] if delivered else None,
@@ -3590,6 +3597,10 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
             kwargs["parse_mode"] = parse_mode
         await _await_with_thread_deadline(
             self._bot.edit_message_text(**kwargs), timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
+        observe_message(chat_id, message_id, _strip_mdv2(text) if parse_mode else text, operation="edited")
+
+    def message_is_deleted(self, chat_id: str, message_id: str) -> bool:
+        return (str(chat_id), str(message_id)) in getattr(self, "_recalled_message_ids", set())
 
     async def _edit_markdown_or_plain(self, chat_id: str, message_id: str, formatted: str, plain: str, warn_fmt: str) -> bool:
         """MarkdownV2 edit, plain fallback on a parse error; True on a "not modified" no-op. Errors propagate."""
@@ -3623,6 +3634,8 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         continuations, and return the final chunk's id as the next edit target."""
         if not self._bot:
             return await self._edit_via_replacement(chat_id, message_id, content, finalize=finalize, metadata=metadata)
+        if self.message_is_deleted(chat_id, message_id):
+            return SendResult(success=True, message_id=message_id, raw_response={"skipped": True})
         # Shared per-chat budget (#116312): an interim (preview) edit is SKIPPED when the slot is busy —
         # the text it would show is shown by the next edit anyway, so a burst of edits can't trip flood
         # control. A final edit is never gated (the completed answer is always delivered). Sends wait for
@@ -4843,6 +4856,7 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         return reply_to_id, {
             "chat_id": normalize_telegram_chat_id(chat_id), "reply_to_message_id": reply_to_id,
             "read_timeout": _MEDIA_SEND_READ_TIMEOUT, **thread_kwargs, **self._notification_kwargs(metadata)}
+
 
     @staticmethod
     def _caption_1024(caption: Optional[str]) -> Optional[str]:

@@ -156,9 +156,13 @@ async def _send_chunk(adapter: Any, chat_id: str, media: list, opened: list, met
         budget, deadline = scaled_budgets(opened, _MEDIA_SEND_DEADLINE, kwargs["read_timeout"])  # the chunk's on-disk bytes
         for attempt in range(kinds.SAME_REQUEST_ATTEMPTS):
             try:
-                await adapter._send_with_dm_topic_reply_anchor_retry(
+                messages = await adapter._send_with_dm_topic_reply_anchor_retry(
                     adapter._bot.send_media_group, {**kwargs, **budget, "media": media}, meta, "media group",
                     reset_media=reset, deadline=deadline)
+                from plugins.platforms.telegram.telegram_message_events import observe_message
+                for message, photo in zip(messages, media):
+                    observe_message(chat_id, message.message_id, f"[photo] {photo.caption or ''}".rstrip(),
+                                    thread_id=adapter._metadata_thread_id(meta))
                 return
             except Exception as err:
                 if (kinds.send_error_kind(err) != kinds.SERVER_ERROR

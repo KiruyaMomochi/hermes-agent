@@ -77,6 +77,8 @@ async def edit_overflow_split(
                 error=flood.error if flood else "overflow_continuation_failed", raw_response=raw,
                 continuation_message_ids=tuple(continuation_ids))
         new_id = str(getattr(sent_msg, "message_id", "")) or prev_id
+        from plugins.platforms.telegram.telegram_message_events import observe_message
+        observe_message(chat_id, new_id, chunk, thread_id=thread_id)
         if finalize and new_id != prev_id:
             await adapter._record_sent_text(chat_id, new_id, quotable_text(chunk))
         continuation_ids.append(new_id)
