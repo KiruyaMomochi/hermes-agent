@@ -88,6 +88,11 @@ async def delete_message(adapter: Any, chat_id: str, message_id: str, *, confirm
     async def _delete() -> bool:
         try:
             await adapter._bot.delete_message(chat_id=normalize_telegram_chat_id(chat_id), message_id=int(message_id))
+            # The confirmed and deferred doors share this physical operation. A queued
+            # delete is not a receipt, and a confirmed delete must notify observers too.
+            from plugins.platforms.telegram.telegram_message_events import observe_message
+            adapter.__dict__.setdefault("_recalled_message_ids", set()).add((str(chat_id), str(message_id)))
+            observe_message(chat_id, message_id, "", operation="deleted")
             return True
         except Exception as e:  # health: allow BLE001 -- best-effort delete (moved from adapter.py): every failure is a logged False
             note_flood(adapter, chat_id, e)
