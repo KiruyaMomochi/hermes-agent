@@ -1298,6 +1298,9 @@ DEFAULT_CONFIG = {
         "user_profile_enabled": True,
         "prefetch_spill_enabled": False,  # External recall opt-in to hooks.output_spill.
         "recall_injection": "text",  # text | tool_result (request-only synthetic hy_search).
+        # Substrings in assistant output (e.g. safety-refusal boilerplate) that suppress
+        # post-turn external memory sync and background review for that turn.
+        "skip_patterns": [],
         # Approval gate for memory writes on BOTH foreground turns and the background review fork.
         # true = foreground writes prompt inline; background writes are staged (/memory
         # pending|approve <id>|reject <id>). To disable memory: memory_enabled.
