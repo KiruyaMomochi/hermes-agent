@@ -59,7 +59,7 @@ HERMES_PROVIDER_ACME_1A2B3C4D_API_KEY
 OPERATOR_ALLOWED = """
 AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE AWS_DEFAULT_REGION
 AWS_REGION AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN
-CLAUDE_CODE_OAUTH_TOKEN AUXILIARY_VISION_PROVIDER AUXILIARY_VISION_MODEL GATEWAY_RELAY_URL
+CLAUDE_CODE_OAUTH_TOKEN SUDO_PASSWORD AUXILIARY_VISION_PROVIDER AUXILIARY_VISION_MODEL GATEWAY_RELAY_URL
 GATEWAY_RELAY_PLATFORMS MY_APP_KEY MY_CUSTOM_VAR
 """.split()
 
@@ -81,6 +81,7 @@ def test_terminal_child_observes_declared_policy(child_env, monkeypatch):
                    if meta.get("category") in {"tool", "messaging"}
                    or (meta.get("category") == "setting" and meta.get("password")))
     blocked.discard("CLAUDE_CODE_OAUTH_TOKEN")  # operator's subscription, not Hermes inference
+    blocked.discard("SUDO_PASSWORD")  # kept for hand-written sudo -S in the shell
     for name in blocked | set(OPERATOR_ALLOWED):
         monkeypatch.setenv(name, "fake-" + name)
     before = dict(os.environ)
@@ -1489,7 +1490,7 @@ class TestBlocklistCoverage:
                 assert name in _HERMES_PROVIDER_ENV_BLOCKLIST, (
                     f"Optional env var {name} (category={category}) missing from blocklist"
                 )
-            elif category == "setting" and metadata.get("password"):
+            elif category == "setting" and metadata.get("password") and name != "SUDO_PASSWORD":
                 assert name in _HERMES_PROVIDER_ENV_BLOCKLIST, (
                     f"Secret setting env var {name} missing from blocklist"
                 )

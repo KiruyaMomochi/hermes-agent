@@ -109,6 +109,10 @@ def _build_provider_env_blocklist() -> frozenset:
     # inference credential — Claude subscription auth is not a working Hermes provider path. It arrives via
     # the registry loop above (anthropic api_key_env_vars), so remove it explicitly. See #55878.
     blocked.discard("CLAUDE_CODE_OAUTH_TOKEN")
+    # Keep SUDO_PASSWORD visible to the terminal shell so it can be used by hand (``sudo -S`` inside a
+    # script, ``sudo -u`` piping). The automatic ``sudo`` rewrite reads it from the gateway process and
+    # doesn't need this; it is the user's own choice to expose it on a single-user machine.
+    blocked.discard("SUDO_PASSWORD")
     # BUZZ_* is deliberately NOT discarded here, even for Buzz-managed agents (BUZZ_MANAGED_AGENT set by the
     # buzz-acp harness). See #76243, #78026, #78065, #78511.
     return frozenset(blocked)
