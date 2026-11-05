@@ -93,6 +93,39 @@ def _drop_verification_continuation_scaffolding(messages) -> None:
     ]
 
 
+def _memory_skip_patterns() -> list[str]:
+    """Configured ``memory.skip_patterns`` substrings that suppress memory sync and review."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        raw = (load_config_readonly().get("memory") or {}).get("skip_patterns") or []
+        return [p for p in raw if isinstance(p, str) and p] if isinstance(raw, list) else []
+    except Exception:
+        return []
+
+
+def _matches_memory_skip_patterns(text: Any, patterns: Optional[list[str]] = None) -> bool:
+    if patterns is None:
+        patterns = _memory_skip_patterns()
+    if not patterns or not text:
+        return False
+    s = text if isinstance(text, str) else _summarize_user_message_for_log(text, sep="\n")
+    return bool(s and any(p in s for p in patterns))
+
+
+def _transcript_has_memory_skip_patterns(messages: Any, patterns: Optional[list[str]] = None) -> bool:
+    """True when any active message in ``messages`` matches ``memory.skip_patterns`` (until removed via /undo)."""
+    if patterns is None:
+        patterns = _memory_skip_patterns()
+    if not patterns or not messages:
+        return False
+    return any(
+        isinstance(m, dict)
+        and m.get("role") in ("user", "assistant")
+        and _matches_memory_skip_patterns(m.get("content"), patterns)
+        for m in messages
+    )
+
+
 def _clone_background_review_messages(messages):
     """Copy the review input without aliasing the live transcript."""
     # Lazy: conversation_loop imports this module (cycle).
@@ -613,6 +646,9 @@ def _mirror_turn_to_memory(
     ``pre_llm_call`` hook vetoed never leaves the host, so neither runs for that turn."""
     if vetoed:
         return
+    patterns = _memory_skip_patterns()
+    if _matches_memory_skip_patterns(final_response, patterns) or _matches_memory_skip_patterns(original_user_message, patterns):
+        return
     agent._sync_external_memory_for_turn(
         original_user_message=original_user_message, final_response=final_response,
         interrupted=interrupted, messages=messages,
@@ -626,6 +662,7 @@ def _mirror_turn_to_memory(
         and not interrupted
         and not getattr(agent, "skip_background_review", False)
         and (review_memory or review_skills)
+        and not _transcript_has_memory_skip_patterns(messages, patterns)
     ):
         with suppress(Exception):
             agent._spawn_background_review(

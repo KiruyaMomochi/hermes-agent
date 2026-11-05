@@ -60,15 +60,15 @@ def _stub_agent_for_finalize(agent: AIAgent) -> None:
     agent._db_flush_scan_prefix = None
 
 
-def _run_finalize(agent: AIAgent) -> None:
+def _run_finalize(agent: AIAgent, final_response: str = "ok") -> None:
     """Call finalize_turn with conditions that would trigger background review."""
     finalize_turn(
         agent,
-        final_response="ok",
+        final_response=final_response,
         api_call_count=1,
         interrupted=False,
         failed=False,
-        messages=[{"role": "assistant", "content": "ok"}],
+        messages=[{"role": "assistant", "content": final_response}],
         conversation_history=[],
         effective_task_id="test",
         turn_id="test-turn",
@@ -140,3 +140,51 @@ def test_persistence_failure_error_fallback_is_pinned_and_leaves_final_response_
     assert f"`hermes {selector}doctor`" in result["error"]
     assert agent._sync_external_memory_for_turn.call_args.kwargs["final_response"] == ""
     agent._spawn_background_review.assert_not_called()
+
+
+def test_memory_skip_patterns_suppress_sync_and_pause_review_until_undone(monkeypatch):
+    """``memory.skip_patterns`` suppresses external memory sync and background review on a
+    matching turn, and pauses background review on subsequent turns as long as any matching
+    message remains in the active transcript (i.e. until ``/undo`` removes it)."""
+    from typing import Any, cast
+
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config_readonly",
+        lambda: {"memory": {"skip_patterns": ["[SKIP_REFUSAL]"]}},
+    )
+    agent = _make_agent()
+    _stub_agent_for_finalize(agent)
+
+    # 1. Turn that emits a matching pattern: neither external sync nor background review runs.
+    _run_finalize(agent, final_response="[SKIP_REFUSAL] canned response")
+    cast(Any, agent._sync_external_memory_for_turn).assert_not_called()
+    cast(Any, agent._spawn_background_review).assert_not_called()
+
+    # 2. Subsequent normal turn while the refusal turn is still in messages (not undone yet):
+    #    external sync for the new normal turn runs, but background review stays paused.
+    finalize_turn(
+        agent,
+        final_response="normal reply",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "[SKIP_REFUSAL] canned response"},
+            {"role": "user", "content": "second"},
+            {"role": "assistant", "content": "normal reply"},
+        ],
+        conversation_history=[],
+        effective_task_id="test",
+        turn_id="test-turn-2",
+        user_message="second",
+        original_user_message="second",
+        _should_review_memory=True,
+        _turn_exit_reason="text_response(1)",
+    )
+    cast(Any, agent._sync_external_memory_for_turn).assert_called_once()
+    cast(Any, agent._spawn_background_review).assert_not_called()
+
+    # 3. Once the refusal turn is removed (e.g. via /undo), background review resumes.
+    _run_finalize(agent, final_response="clean reply")
+    cast(Any, agent._spawn_background_review).assert_called_once()
