@@ -32,7 +32,10 @@ from persistence.sqlite._state.common import (
 from persistence.sqlite._state.holders import _read_proc_argv
 from storage_errors import is_fts_scoped_corruption_error, is_sqlite_lock_error
 
+from ._state.cjk_schema import _ensure_fts_cjk_schema, _quarantine_cjk_after_update_of_migration
+
 from ._schema_ddl import (
+    FTS_CJK_STALE_KEY, _FTS_CJK_TRIGGERS,
     DEFERRED_INDEX_SQL, FTS_REBUILD_DEFERRAL_KEY,
     FTS_SQL, FTS_STALE_KEY, FTS_STORAGE_VERSION, FTS_TRIGRAM_SQL, LEGACY_FTS_SQL, LEGACY_FTS_TRIGRAM_SQL,
     SCHEMA_SQL, SCHEMA_VERSION, _FTS5_SHADOW_SUFFIXES, _FTS_TRIGGERS, _drop_orphan_fts_shadow_tables,
@@ -294,7 +297,17 @@ def _sqlite_supports_fts5(holder: StoreHolder, cursor: sqlite3.Cursor) -> bool:
 
 
 def _drop_all_fts_triggers(holder: StoreHolder, cursor: sqlite3.Cursor) -> None:
+    if cursor.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'trigger' "
+        f"AND name IN ({','.join('?' for _ in _FTS_CJK_TRIGGERS)}) LIMIT 1",
+        _FTS_CJK_TRIGGERS,
+    ).fetchone():
+        # Detached sync leaves an unknown CJK gap even after the base indexes recover.
+        cursor.execute(_STALE_KEY_UPSERT_SQL, (FTS_CJK_STALE_KEY,))
     _drop_fts_triggers(cursor)
+    for trigger in _FTS_CJK_TRIGGERS:
+        with contextlib.suppress(sqlite3.OperationalError):
+            cursor.execute(f"DROP TRIGGER IF EXISTS {trigger}")
 
 
 def _fts_triggers_missing(cursor: sqlite3.Cursor, names: Sequence[str]) -> bool:
@@ -318,8 +331,12 @@ def _migrate_broad_fts_update_triggers(holder: StoreHolder, cursor: sqlite3.Curs
     """Replace broad AFTER UPDATE FTS triggers with AFTER UPDATE OF variants (``IF NOT EXISTS``
     never replaces an existing broad trigger). No FTS rebuild: correctness was already
     gated by WHEN clauses; OF only skips trigger evaluation. Returns the number dropped."""
+    # CJK is v23-only. Decide the layout before selecting destructive candidates so the
+    # legacy branch never drops a trigger it won't recreate.
     legacy_layout = _db_has_legacy_inline_fts(cursor)
-    update_names = ("messages_fts_update", "messages_fts_trigram_update")
+    update_names = ("messages_fts_update", "messages_fts_trigram_update") + (
+        () if legacy_layout else ("messages_fts_cjk_update",)
+    )
     placeholders = ", ".join("?" for _ in update_names)
     sql = f"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name IN ({placeholders})"
     rows = cursor.execute(sql, update_names).fetchall()
@@ -333,6 +350,24 @@ def _migrate_broad_fts_update_triggers(holder: StoreHolder, cursor: sqlite3.Curs
     base_sql, trigram_sql = _FTS_DDL[legacy_layout]
     _ensure_fts_schema(holder, cursor, "messages_fts", base_sql)
     _ensure_fts_schema(holder, cursor, "messages_fts_trigram", trigram_sql)
+    # Only recreate the CJK trigger this migration dropped. ``_ensure_fts_cjk_schema`` soft-fails
+    # (never raises), so afterwards require a narrowed trigger or durable quarantine.
+    if "messages_fts_cjk_update" in to_drop:
+        try:
+            _ensure_fts_cjk_schema(holder, cursor)
+        except Exception:
+            _quarantine_cjk_after_update_of_migration(holder, cursor)
+            logger.exception("CJK FTS re-ensure after UPDATE OF migration failed")
+            raise
+        row = cursor.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?", ("messages_fts_cjk_update",),
+        ).fetchone()
+        if not row or _fts_update_trigger_needs_narrowing(row[0]):
+            _quarantine_cjk_after_update_of_migration(holder, cursor)
+            logger.warning(
+                "CJK FTS UPDATE trigger missing or still broad after "
+                "UPDATE OF migration; marked stale and unavailable"
+            )
     logger.info("Migrated %d broad FTS UPDATE trigger(s) to AFTER UPDATE OF (no rebuild required)", len(to_drop))
     return len(to_drop)
 
@@ -353,7 +388,7 @@ def _fts_index_is_misaligned_source(cursor: sqlite3.Cursor) -> bool:
 def _mark_fts_detached(holder: StoreHolder) -> None:
     """This holder stops reading and syncing the derived FTS indexes; search answers by LIKE."""
     holder._fts_stale = True
-    holder._fts_enabled = holder._trigram_available = False
+    holder._fts_enabled = holder._trigram_available = holder._fts_cjk_available = False
 
 
 def _execute_ddl_skipping_settled_triggers(cursor: sqlite3.Cursor, ddl: str) -> None:
@@ -713,6 +748,9 @@ def retry_deferred_fts_recovery(holder: StoreHolder) -> bool:
             legacy = _db_has_legacy_inline_fts(cursor)
             recovered = _recover_stale_fts(holder, cursor, legacy=legacy, timeout_seconds=0.0)
             if recovered:
+                # CJK was detached alongside the base indexes; its own ensure path
+                # decides when it comes back online.
+                _ensure_fts_cjk_schema(holder, cursor)
                 holder._fts_stale_retry_interval = 0.0
             with contextlib.suppress(sqlite3.Error):
                 holder._conn.commit()
@@ -1078,14 +1116,10 @@ def _init_schema(holder: StoreHolder):
     )
     cursor = holder._conn.cursor()
     cursor.executescript(SCHEMA_SQL)
-    # Before the table rebuilds below: renaming a table re-parses every trigger, and the retired
-    # index's triggers name a tokenizer this process cannot load.
-    if drop_retired_cjk_index(cursor):
-        logger.warning(
-            "Removed the retired messages_fts_cjk index; CJK search now uses the trigram index. "
-            "`hermes sessions optimize-storage` reclaims its disk space. "
-            "%s is no longer loaded and can be deleted.", holder.db_path.parent / "lib" / "libfts5_cjk.so",
-        )
+    # A tokenizer-less opener detaches only the sync triggers before schema reparsing.
+    # The live index remains intact for the next capable host.
+    if not holder._fts_cjk_loaded:
+        _ensure_fts_cjk_schema(holder, cursor)
 
     # Column reconciliation, then the two table-shape repairs ADD COLUMN cannot express.
     _reconcile_columns(cursor, holder.db_path.parent)
@@ -1415,13 +1449,16 @@ def _init_fts(holder: StoreHolder, cursor: sqlite3.Cursor) -> None:
     # below would fail on the first shadow. Drop only orphaned families, then rebuild the
     # recreated (empty) index like a missing-trigger repair (#103840).
     orphan_repaired = _drop_orphan_fts_shadow_tables(
-        cursor, ("messages_fts", "messages_fts_trigram"),
+        cursor, ("messages_fts", "messages_fts_trigram", "messages_fts_cjk"),
     )
     if not holder._fts_stale:
         _migrate_misaligned_fts_source(holder, cursor, legacy=legacy_fts)
     if holder._fts_stale:
-        if not _recover_stale_fts(holder, cursor, legacy=legacy_fts):
-            holder._fts_enabled = holder._trigram_available = False
+        if _recover_stale_fts(holder, cursor, legacy=legacy_fts):
+            # CJK was detached alongside the base indexes; its ensure path decides when it returns.
+            _ensure_fts_cjk_schema(holder, cursor)
+        else:
+            holder._fts_enabled = holder._trigram_available = holder._fts_cjk_available = False
     else:
         base_sql, trigram_sql = _FTS_DDL[legacy_fts]
         # Measure before any DDL. Publishing missing base triggers before rebuild admission lets
@@ -1441,6 +1478,8 @@ def _init_fts(holder: StoreHolder, cursor: sqlite3.Cursor) -> None:
             _rebuild_fts_indexes(
                 cursor, legacy=legacy_fts, include_trigram=holder._trigram_available,
             )
+            if not legacy_fts:
+                _ensure_fts_cjk_schema(holder, cursor)
 
         if base_triggers_missing:
             # The authority covers the whole first-publication sequence, not merely the final rebuild.
@@ -1460,6 +1499,9 @@ def _init_fts(holder: StoreHolder, cursor: sqlite3.Cursor) -> None:
                             cursor, legacy=legacy_fts, include_trigram=trigram_enabled,
                         ),
                     )
+        if holder._fts_enabled and not legacy_fts and not base_triggers_missing:
+            # CJK-bigram index: strictly additive, gated on the loadable tokenizer.
+            _ensure_fts_cjk_schema(holder, cursor)
     # IF NOT EXISTS cannot rewrite pre-existing broad AFTER UPDATE triggers.
     if holder._fts_enabled:
         _migrate_broad_fts_update_triggers(holder, cursor)
@@ -1536,9 +1578,10 @@ def _is_fts5_unavailable_error(exc: sqlite3.OperationalError) -> bool:
 
 
 def _is_trigram_unavailable_error(exc: sqlite3.OperationalError) -> bool:
-    """Only the trigram tokenizer is missing (it needs SQLite >= 3.34): "this one index can't be served",
-    never "disable FTS"."""
-    return "no such tokenizer: trigram" in str(exc).lower()
+    """Only an optional tokenizer is missing (trigram needs SQLite >= 3.34;
+    cjk_unicode61 is loadable): "this one index can't be served", never "disable FTS"."""
+    err = str(exc).lower()
+    return "no such tokenizer: trigram" in err or "no such tokenizer: cjk_unicode61" in err
 
 
 def _db_has_legacy_inline_fts(cursor: sqlite3.Cursor) -> bool:
@@ -1709,31 +1752,31 @@ def _has_fts_trash(holder: StoreHolder, conn) -> bool:
     ).fetchone())
 
 
-_RETIRED_CJK_TRIGGERS = ("messages_fts_cjk_insert", "messages_fts_cjk_delete", "messages_fts_cjk_update")
-_RETIRED_CJK_OBJECTS = (*_RETIRED_CJK_TRIGGERS, "messages_fts_cjk_src", "messages_fts_cjk",
+_PROBE_CJK_TRIGGERS = ("messages_fts_cjk_insert", "messages_fts_cjk_delete", "messages_fts_cjk_update")
+_PROBE_CJK_OBJECTS = (*_PROBE_CJK_TRIGGERS, "messages_fts_cjk_src", "messages_fts_cjk",
                         *(f"messages_fts_cjk_{suffix}" for suffix in _FTS5_SHADOW_SUFFIXES))
 
 
-def retired_cjk_index_present(cursor: sqlite3.Cursor) -> bool:
-    """True when an object of the ``messages_fts_cjk`` index an earlier release built is still in the schema."""
+def cjk_index_present(cursor: sqlite3.Cursor) -> bool:
+    """True when an object of the ``messages_fts_cjk`` index exists in the schema."""
     return cursor.execute(
-        f"SELECT 1 FROM sqlite_master WHERE name IN ({','.join('?' for _ in _RETIRED_CJK_OBJECTS)}) LIMIT 1",
-        _RETIRED_CJK_OBJECTS,
+        f"SELECT 1 FROM sqlite_master WHERE name IN ({','.join('?' for _ in _PROBE_CJK_OBJECTS)}) LIMIT 1",
+        _PROBE_CJK_OBJECTS,
     ).fetchone() is not None
 
 
-def drop_retired_cjk_index(cursor: sqlite3.Cursor) -> bool:
-    """Remove the ``messages_fts_cjk`` index an earlier release built with the loadable cjk_unicode61
-    tokenizer, and its markers. The shadow tables are renamed into the FTS trash, which
-    ``optimize_fts_storage`` empties in chunks. Idempotent; True when anything was removed.
-    Reuse a caller's transaction without committing it; otherwise own the atomic retirement."""
-    if not retired_cjk_index_present(cursor):
+def drop_unavailable_cjk_probe_index(cursor: sqlite3.Cursor) -> bool:
+    """Detach an unavailable CJK index ONLY from a disposable health-probe snapshot.
+    Never call on the live store: tokenizer absence is not permission to delete its index.
+    Preserve the upstream atomic detach and legacy-rename handling for snapshots whose
+    other FTS indexes may themselves be damaged or unavailable."""
+    if not cjk_index_present(cursor):
         return False
     owns_transaction = not cursor.connection.in_transaction
     if owns_transaction:
         cursor.execute("BEGIN IMMEDIATE")
     try:
-        removed = _stage_retired_cjk_index(cursor)
+        removed = _stage_unavailable_cjk_probe_index(cursor)
         if owns_transaction:
             cursor.connection.commit()
         return removed
@@ -1743,12 +1786,12 @@ def drop_retired_cjk_index(cursor: sqlite3.Cursor) -> bool:
         raise
 
 
-def _stage_retired_cjk_index(cursor: sqlite3.Cursor) -> bool:
+def _stage_unavailable_cjk_probe_index(cursor: sqlite3.Cursor) -> bool:
     """Recheck after acquiring the write lock: another opener may have finished retirement."""
-    if not retired_cjk_index_present(cursor):
+    if not cjk_index_present(cursor):
         return False
     # Triggers first: they call the tokenizer, so while they exist every outside write to messages fails.
-    for trigger in _RETIRED_CJK_TRIGGERS:
+    for trigger in _PROBE_CJK_TRIGGERS:
         cursor.execute(f"DROP TRIGGER IF EXISTS {trigger}")
     cursor.execute("DROP VIEW IF EXISTS messages_fts_cjk_src")
     cursor.execute(
@@ -1772,7 +1815,7 @@ def _stage_retired_cjk_index(cursor: sqlite3.Cursor) -> bool:
 
 
 # FTS5 tables merged on optimize; each is probed before touching (trigram may be disabled).
-_FTS_TABLES = ("messages_fts", "messages_fts_trigram")
+_FTS_TABLES = ("messages_fts", "messages_fts_trigram", "messages_fts_cjk")
 
 
 def _try_incremental_merge_fts(holder: StoreHolder) -> None:

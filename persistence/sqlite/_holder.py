@@ -9,6 +9,8 @@ out one holder per resolved path per process.
 import asyncio
 import atexit
 import contextlib
+
+from persistence.sqlite._state.cjk import load_fts5_cjk_extension
 import errno
 import hashlib
 import logging
@@ -356,7 +358,7 @@ class StoreHolder:
         self._db_corrupt, self._db_corrupt_reason = False, ""  # sticky quarantine (StateDbCorruptError)
         self._fts_usermerge_floor_applied = False  # one-shot usermerge-floor write guard
         self._fts_enabled = self._fts_stale = self._trigram_available = False
-        self._fts_unavailable_warned = False
+        self._fts_cjk_loaded = self._fts_cjk_available = self._fts_unavailable_warned = False
         # The read connection each thread's open ``transcript_read_snapshot`` pinned.
         self._snapshot_pins = threading.local()
         self._conn = None
@@ -464,6 +466,7 @@ class StoreHolder:
                 self._conn = conn = self._connect_read_only(timeout=self._read_busy_timeout_s)
                 try:
                     apply_database_pragmas(conn, db_label="state.db")
+                    self._fts_cjk_loaded = load_fts5_cjk_extension(conn, self.db_path.parent)
                     if self._check_drift and (drift := declared_schema_drift(conn, self.db_path.parent)):
                         raise DeclarativeDrift(drift)
                     cursor = conn.cursor()
@@ -471,6 +474,14 @@ class StoreHolder:
                     if self._fts_enabled:
                         self._trigram_available = (
                             _fts_table_probe(self, cursor, "messages_fts_trigram") is True
+                        )
+                        self._fts_cjk_available = (
+                            self._fts_cjk_loaded
+                            and _fts_table_probe(self, cursor, "messages_fts_cjk") is True
+                            and cursor.execute(
+                                "SELECT 1 FROM state_meta WHERE key IN "
+                                "('fts_stale', 'fts_cjk_stale', 'fts_cjk_rebuild_high_water') LIMIT 1"
+                            ).fetchone() is None
                         )
                 except BaseException:
                     self._conn = None
@@ -541,6 +552,7 @@ class StoreHolder:
             _secure_state_db_files(self.db_path)
             apply_database_pragmas(conn, db_label="state.db")
             conn.execute("PRAGMA foreign_keys=ON")
+            self._fts_cjk_loaded = load_fts5_cjk_extension(conn, self.db_path.parent)
         except BaseException:
             self._close_connection_quietly(conn)
             raise
@@ -606,6 +618,8 @@ class StoreHolder:
         try:
             conn = self._connect_read_only(timeout=_READ_BUSY_TIMEOUT_S)
             apply_database_pragmas(conn, db_label="state.db")
+            if self._fts_cjk_loaded:
+                load_fts5_cjk_extension(conn, self.db_path.parent)
         except BaseException as exc:
             # A half-open connection (open ok, pragmas failed) is a live tracked descriptor,
             # the leak shape this pool exists to fix; a stranded permit would shrink the read

@@ -19,24 +19,31 @@ from persistence.sqlite._state.repair import _release_auto_maintenance_lock, _tr
 
 from .._backend import translated
 from .._holder import StoreHolder
+from .._state.cjk_schema import _ensure_fts_cjk_schema
 from .._schema import (
     _FTS_TRASH_PREFIX, _db_has_legacy_inline_fts, _db_needs_fts_storage_upgrade, _delete_meta, _drop_fts_triggers,
     _ensure_fts_schema, _fts_external_index_empty_with_messages, _has_fts_trash, _meta_row, _present_fts_tables,
 )
 from .._schema_ddl import (
-    FTS_SQL, FTS_STORAGE_VERSION, FTS_TOOL_CONTENT_PREFIX_CHARS, FTS_TRIGRAM_SQL, SCHEMA_VERSION, fts_layout_current,
+    FTS_CJK_STALE_KEY, _FTS_CJK_TRIGGERS, FTS_SQL, FTS_STORAGE_VERSION, FTS_TOOL_CONTENT_PREFIX_CHARS, FTS_TRIGRAM_SQL, SCHEMA_VERSION, fts_layout_current,
     fts_layout_drift,
 )
 from ..conversation._store.search import (
     _BASE_BOUNDARY_SWEEP_SQL, _CHUNK_INSERT_SQL, _HOLDER_SCAN_INTERVAL_S, _OPTIMIZE_CHUNK_ATTEMPTS,
     _TRIGRAM_BOUNDARY_SWEEP_SQL, _TRIGRAM_CHUNK_INSERT_SQL, _VACUUM_TICK_S, _backfill_progress, _BackfillProgress,
-    fts_rebuild_status,
+    _rebuild_status,
 )
 from . import _reconcile
 from ._base import AdminFile
 
 # caplog tests pin the "hermes_state" logger name.
 logger = logging.getLogger("hermes_state")
+
+_BOUNDARY_SWEEP_SQL = (
+    "INSERT INTO {table}(rowid, content, tool_name, tool_calls) "
+    "SELECT m.id, m.content, m.tool_name, m.tool_calls FROM messages m WHERE m.id > ? AND m.id <= ? {extra}"
+    "AND NOT EXISTS (SELECT 1 FROM {table}_docsize d WHERE d.id = m.id)"
+)
 
 
 def _optimize_fts(holder: StoreHolder) -> int:
@@ -180,15 +187,10 @@ class _FtsStorageOptimizer:
         insurance against a write that slipped between high_water capture and trigger
         activation. The trigram half is gated on ``_trigram_available``: without the
         tokenizer/table an unconditional INSERT raises and aborts the whole rebuild."""
-        def _do(conn):
-            hw_row = _meta_row(conn, "fts_rebuild_high_water")
-            if hw_row is not None:
-                hw = int(hw_row[0])
-                conn.execute(_BASE_BOUNDARY_SWEEP_SQL, (FTS_TOOL_CONTENT_PREFIX_CHARS, hw - 1000, hw + 1000))
-                if self._holder._trigram_available:
-                    conn.execute(_TRIGRAM_BOUNDARY_SWEEP_SQL, (hw - 1000, hw + 1000))
-            _delete_meta(conn, "fts_rebuild_high_water", "fts_rebuild_progress")
-        self._holder._execute_write(_do)
+        sweeps = [(_BASE_BOUNDARY_SWEEP_SQL, True)]
+        if self._holder._trigram_available:
+            sweeps.append((_TRIGRAM_BOUNDARY_SWEEP_SQL, False))
+        self._rebuild_finish("fts_rebuild", sweeps)
         logger.info("Deferred FTS rebuild complete — all messages indexed.")
 
     def fts_rebuild_step(self, progress: Optional[_BackfillProgress] = None) -> bool:
@@ -201,46 +203,8 @@ class _FtsStorageOptimizer:
         inserts = [_CHUNK_INSERT_SQL]
         if self._holder._trigram_available:
             inserts.append(_TRIGRAM_CHUNK_INSERT_SQL)
-        high_water_raw = self._holder.get_meta("fts_rebuild_high_water")
-        if high_water_raw is None:
-            return False
-        high_water = int(high_water_raw)
-        chunk = self._fts_chunk_rows
-
-        def _do(conn):
-            # Re-reading progress inside the BEGIN IMMEDIATE held by _execute_write IS
-            # the claim: two workers cannot read the same value.
-            row = _meta_row(conn, "fts_rebuild_progress")
-            if row is None:
-                return False, 0  # finished (or cleared) by another process
-            done = int(row[0])
-            if done >= high_water:
-                return False, 0
-            # The window is the next `chunk` messages, not `chunk` ids: an id gap (pruned
-            # sessions) neither shrinks a chunk nor lets the next one span a million dense ids.
-            nth = conn.execute("SELECT id FROM messages WHERE id > ? AND id <= ? ORDER BY id LIMIT 1 OFFSET ?",
-                               (done, high_water, chunk - 1)).fetchone()
-            upper = int(nth[0]) if nth is not None else high_water
-            covered = chunk if nth is not None else 0
-            if nth is None and progress is not None:  # the last, short window (< chunk rows)
-                covered = conn.execute("SELECT COUNT(*) FROM messages WHERE id > ? AND id <= ?",
-                                       (done, upper)).fetchone()[0]
-            for sql in inserts:
-                conn.execute(sql, (done, upper))
-            # Progress lands in the same transaction as its rows (crash-atomic).
-            conn.execute("UPDATE state_meta SET value = ? WHERE key = ?", (str(upper), "fts_rebuild_progress"))
-            return upper < high_water, covered
-
-        more, covered = self._holder._execute_write(_do)
-        if progress is not None:
-            # Counted after the commit: _execute_write may replay _do on contention.
-            progress.indexed += covered
-        if more is False:
-            status = fts_rebuild_status(self._holder)
-            if high_water <= 0 or (status is not None and status["indexed"] >= status["total"]):
-                self._fts_rebuild_finish()
-            return False
-        return bool(more)
+        return self._rebuild_step("fts_rebuild", inserts, finish=self._fts_rebuild_finish, finish_when_empty=True,
+                                  progress=progress)
 
     def _fts_teardown_trash_step(self, progress: Optional[_TeardownProgress] = None) -> bool:
         """Tear down one chunk (``_fts_chunk_rows`` rows) of a demoted v22 FTS shadow table (a PLAIN
@@ -396,6 +360,10 @@ class _FtsStorageOptimizer:
             return (
                 _db_needs_fts_storage_upgrade(conn)
                 or _meta_row(conn, "fts_rebuild_high_water") is not None  # interrupted optimize
+                or (holder._fts_cjk_loaded and (
+                    _meta_row(conn, "fts_cjk_rebuild_high_water") is not None
+                    or _meta_row(conn, FTS_CJK_STALE_KEY) is not None
+                ))
                 or _has_fts_trash(holder, conn)
                 or _fts_external_index_empty_with_messages(holder, conn)
             )
@@ -424,7 +392,13 @@ class _FtsStorageOptimizer:
                 for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' "
                     "AND (name LIKE 'messages_fts_%' ESCAPE '\\' "
-                    "OR name LIKE 'messages_fts_trigram_%' ESCAPE '\\')"
+                    "OR name LIKE 'messages_fts_trigram_%' ESCAPE '\\') "
+                    # messages_fts_cjk* is an independent v23+ index, not part of the
+                    # demoted legacy layout: fts5's xRename renames the entire shadow
+                    # family in one step, so sweeping the cjk vtable here aborts the
+                    # loop on the next cjk shadow entry and drags _config — needed by
+                    # the vtable constructor — into the trash family (#103647).
+                    "AND name NOT LIKE 'messages\\_fts\\_cjk%' ESCAPE '\\'"
                 ).fetchall():
                     conn.execute(f"ALTER TABLE {row[0]} RENAME TO fts_v22_trash_{row[0]}")
             # Claim the backfill BEFORE the empty v23 tables exist so a crash before
@@ -581,15 +555,21 @@ class _FtsStorageOptimizer:
             # commit and schema ensure.
             self._ensure_v23_fts_tables("failed to re-create v23 messages_fts on optimize-storage resume")
 
+        self._fts_cjk_reset_if_stale()
+        if holder._fts_cjk_loaded:
+            self._ensure_cjk_schema_committed()
+
         emit = progress_cb or (lambda _info: None)
         teardown = _TeardownProgress(counted=progress_cb is not None)
         with _HolderWatch(holder._foreign_state_db_holders, _HOLDER_SCAN_INTERVAL_S) as watch:
-            # Phase 1: base backfill.
-            bf = _backfill_progress(holder, "backfill") if progress_cb else None
-            if bf is not None:
-                emit({**bf.info(), "paced": watch.held})
-            step = partial(self.fts_rebuild_step, bf) if bf else self.fts_rebuild_step
-            self._optimize_drive(step, bf.info if bf else None, emit, watch)
+            for phase, prefix, step in (
+                ("backfill", "fts_rebuild", self.fts_rebuild_step),
+                ("backfill_cjk", "fts_cjk_rebuild", self.fts_cjk_rebuild_step),
+            ):
+                bf = _backfill_progress(holder, phase, prefix) if progress_cb else None
+                if bf is not None:
+                    emit({**bf.info(), "paced": watch.held})
+                self._optimize_drive(partial(step, bf) if bf else step, bf.info if bf else None, emit, watch)
             # Phase 2: tear down the demoted legacy shadow tables in chunks.
             self._optimize_drive(partial(self._fts_teardown_trash_step, teardown), teardown.info, emit, watch)
         with holder._read_ctx() as conn:
@@ -617,6 +597,104 @@ class _FtsStorageOptimizer:
         emit({"phase": "done", "percent": 100, "indexed": 0, "total": 0})
         logger.info("FTS storage optimization complete (layout v%d).", FTS_STORAGE_VERSION)
         return {"ok": True, "vacuumed": vacuum_ok, **({"vacuum_skipped": "in_use"} if vacuum_skipped else {})}
+
+    def _fts_cjk_rebuild_finish(self) -> None:
+        """Boundary sweep + clear the cjk markers; index becomes servable."""
+        sweep = _BOUNDARY_SWEEP_SQL.format(table="messages_fts_cjk", extra="AND m.role <> 'tool' ")
+        self._rebuild_finish("fts_cjk_rebuild", [(sweep, False)])
+        self._holder._fts_cjk_available = True
+        logger.info("CJK FTS index backfill complete — serving CJK search.")
+
+    def _rebuild_finish(self, prefix: str, sweep_sqls: list[tuple[str, bool]]) -> None:
+        """Sweep a generous window around the high-water boundary, then clear the markers.
+        ``(sql, bounded)``: a bounded sweep takes the tool-content prefix_chars param first."""
+        def _do(conn):
+            hw_row = _meta_row(conn, f"{prefix}_high_water")
+            if hw_row is not None:
+                hw = int(hw_row[0])
+                for sql, bounded in sweep_sqls:
+                    params = (FTS_TOOL_CONTENT_PREFIX_CHARS,) if bounded else ()
+                    conn.execute(sql, (*params, hw - 1000, hw + 1000))
+            _delete_meta(conn, f"{prefix}_high_water", f"{prefix}_progress")
+        self._holder._execute_write(_do)
+
+    def fts_cjk_rebuild_step(self, progress: Optional[_BackfillProgress] = None) -> bool:
+        """Backfill one chunk of the CJK index. True while work remains."""
+        if not self._holder._fts_enabled or not self._holder._fts_cjk_loaded:
+            return False
+        insert = ("INSERT INTO messages_fts_cjk(rowid, content, tool_name, tool_calls) "
+                  "SELECT id, content, tool_name, tool_calls FROM messages "
+                  "WHERE id > ? AND id <= ? AND role <> 'tool'")
+        return self._rebuild_step("fts_cjk_rebuild", [insert], finish=self._fts_cjk_rebuild_finish, progress=progress)
+
+    def _rebuild_step(self, prefix: str, insert_sqls: list[str], *, finish, finish_when_empty: bool = False,
+                      progress: Optional[_BackfillProgress] = None) -> bool:
+        """Shared chunk engine for the base and CJK deferred backfills. ``finish_when_empty``
+        finalizes a high_water <= 0 marker (empty messages table) instead of leaving it pending."""
+        high_water_raw = self._holder.get_meta(f"{prefix}_high_water")
+        if high_water_raw is None:
+            return False
+        high_water = int(high_water_raw)
+        chunk = self._fts_chunk_rows
+
+        def _do(conn):
+            # Re-reading progress inside the BEGIN IMMEDIATE held by _execute_write IS
+            # the claim: two workers cannot read the same value.
+            row = _meta_row(conn, f"{prefix}_progress")
+            if row is None:
+                return False, 0  # finished (or cleared) by another process
+            done = int(row[0])
+            if done >= high_water:
+                return False, 0
+            # The window is the next `chunk` messages, not `chunk` ids: an id gap (pruned
+            # sessions) neither shrinks a chunk nor lets the next one span a million dense ids.
+            nth = conn.execute("SELECT id FROM messages WHERE id > ? AND id <= ? ORDER BY id LIMIT 1 OFFSET ?",
+                               (done, high_water, chunk - 1)).fetchone()
+            upper = int(nth[0]) if nth is not None else high_water
+            covered = chunk if nth is not None else 0
+            if nth is None and progress is not None:  # the last, short window (< chunk rows)
+                covered = conn.execute("SELECT COUNT(*) FROM messages WHERE id > ? AND id <= ?",
+                                       (done, upper)).fetchone()[0]
+            for sql in insert_sqls:
+                conn.execute(sql, (done, upper))
+            # Progress lands in the same transaction as its rows (crash-atomic).
+            conn.execute("UPDATE state_meta SET value = ? WHERE key = ?", (str(upper), f"{prefix}_progress"))
+            return upper < high_water, covered
+
+        more, covered = self._holder._execute_write(_do)
+        if progress is not None:
+            # Counted after the commit: _execute_write may replay _do on contention.
+            progress.indexed += covered
+        if more is False:
+            status = _rebuild_status(self._holder, prefix)
+            if (finish_when_empty and high_water <= 0) or (status is not None and status["indexed"] >= status["total"]):
+                finish()
+            return False
+        return bool(more)
+
+    def _fts_cjk_reset_if_stale(self) -> None:
+        """From-scratch rebuild of a stale cjk index (triggers were dropped, gap extent unknown):
+        drop table + triggers, clear the breadcrumb, recreate (fresh backfill markers)."""
+        if not self._holder._fts_cjk_loaded:
+            return
+
+        def _do(conn):
+            if _meta_row(conn, FTS_CJK_STALE_KEY) is None:
+                return False
+            for trig in _FTS_CJK_TRIGGERS:
+                conn.execute(f"DROP TRIGGER IF EXISTS {trig}")
+            conn.execute("DROP TABLE IF EXISTS messages_fts_cjk")
+            conn.execute("DROP VIEW IF EXISTS messages_fts_cjk_src")
+            _delete_meta(conn, FTS_CJK_STALE_KEY, "fts_cjk_rebuild_high_water", "fts_cjk_rebuild_progress")
+            return True
+        if self._holder._execute_write(_do):
+            # Recreate OUTSIDE the write transaction: executescript() implicitly commits.
+            self._ensure_cjk_schema_committed()
+
+    def _ensure_cjk_schema_committed(self) -> None:
+        with self._holder._lock:
+            _ensure_fts_cjk_schema(self._holder, self._holder._conn)
+            self._holder._conn.commit()
 
 
 class MaintenanceAdmin(AdminFile):
@@ -732,7 +810,7 @@ class MaintenanceAdmin(AdminFile):
                 interrupted = bool(
                     conn.execute(
                         "SELECT 1 FROM state_meta "
-                        "WHERE key = 'fts_rebuild_high_water' LIMIT 1"
+                        "WHERE key IN ('fts_rebuild_high_water', 'fts_cjk_rebuild_high_water', 'fts_cjk_stale') LIMIT 1"
                     ).fetchone()
                     or conn.execute(
                         "SELECT 1 FROM sqlite_master WHERE type = 'table' "

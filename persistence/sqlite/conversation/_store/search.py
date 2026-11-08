@@ -136,8 +136,8 @@ def _like_params(term: str) -> list[str]:
 def _strip_cjk_wildcards(raw_query: str) -> str:
     """Drop the trailing prefix wildcard callers append for ASCII ("nimb" -> "nimb*").
 
-    None of the CJK routes can honour that star: the trigram route
-    quotes every token before MATCH (so ``*`` matches a literal asterisk) and
+    None of the CJK routes can honour that star: the bigram and trigram routes
+    quote every token before MATCH (so ``*`` matches a literal asterisk) and
     LIKE has no ``*`` wildcard at all (only ``%``/``_``). Left in place, every
     CJK search arriving from the web/desktop search box — which appends the
     star to each unquoted token so partial English words match — searches for
@@ -229,15 +229,8 @@ def _search_message_fields(fields: Optional[Collection[str]]) -> Optional[tuple[
 
 def fts_rebuild_status(holder: StoreHolder) -> Optional[dict[str, Any]]:
     """Deferred-rebuild progress ``{"pending", "total", "indexed", "percent"}`` or None. Reads
-    via the pooled reader (not get_meta/self._lock) so search never blocks on the writer."""
-    rows = holder._read_all("SELECT key, value FROM state_meta WHERE key IN (?, ?)",
-                          ("fts_rebuild_high_water", "fts_rebuild_progress"))
-    meta = {r["key"]: r["value"] for r in rows}
-    high_water = meta.get("fts_rebuild_high_water")
-    if high_water is None or int(high_water) <= 0:
-        return None
-    total, progress = int(high_water), int(meta.get("fts_rebuild_progress") or 0)
-    return {"pending": True, "total": total, "indexed": progress, "percent": min(100, int(100 * progress / total))}
+    via the pooled reader (not get_meta/holder._lock) so search never blocks on the writer."""
+    return _rebuild_status(holder, "fts_rebuild")
 
 
 _BASE_BOUNDARY_SWEEP_SQL = (
@@ -271,10 +264,10 @@ _TRIGRAM_CHUNK_INSERT_SQL = (
 )
 
 
-def _backfill_progress(holder: StoreHolder, phase: str) -> Optional[_BackfillProgress]:
+def _backfill_progress(holder: StoreHolder, phase: str, prefix: str = "fts_rebuild") -> Optional[_BackfillProgress]:
     """Messages at or below the rebuild high water, and how many of them the resume marker already
     covers (one scan per pass); None when the pass has nothing pending."""
-    st = fts_rebuild_status(holder)
+    st = _rebuild_status(holder, prefix)
     if st is None:
         return None
     with holder._read_ctx() as conn:
@@ -432,6 +425,8 @@ def _describe_search_path(holder: StoreHolder, query: str) -> str:
         if not _contains_cjk(sanitized):
             return "fts5"
         raw = sanitized.strip('"').strip()
+        if holder._fts_cjk_available and not _has_lone_cjk_run(raw):
+            return "fts_cjk"
         return "trigram" if _trigram_route_ok(holder, raw) else "like_scan"
     except Exception:  # health: allow BLE001 -- the route is diagnostic; a failure reads unknown
         return "unknown"
@@ -725,8 +720,8 @@ def _search_messages_impl(
 
     order_by_sql = _FTS_ORDER_BY.get(sort.strip().lower() if isinstance(sort, str) else None, _FTS_RANK_ORDER_BY)
     route = dict(order_by_sql=order_by_sql, limit=limit, offset=offset, **filters)
-    # Tool rows and FTS_TRIGRAM_EXCLUDED_SOURCES sessions are excluded from the trigram
-    # index (see FTS_TRIGRAM_SQL); an explicit filter for them must scan the base table.
+    # Tool rows and FTS_TRIGRAM_EXCLUDED_SOURCES sessions are excluded from the trigram/cjk
+    # indexes (see FTS_TRIGRAM_SQL); an explicit filter for them must scan the base table.
     wants_unindexed_rows = (bool(role_filter) and "tool" in role_filter) or (
         bool(source_filter) and any(src in FTS_TRIGRAM_EXCLUDED_SOURCES for src in source_filter))
     is_cjk = _contains_cjk(query)
@@ -761,11 +756,21 @@ def _search_messages_impl(
 
     # unicode61 puts no boundary between Latin and adjacent CJK ("修改youer服务端" is
     # one token, so MATCH "youer" misses). On a zero-result Latin miss retry the
-    # trigram index (>=3-char tokens). Gated on a miss so hits keep their ranking ("cat"
-    # may then match "concatenate"). Skipped for role='tool' (trigram excludes tool rows).
+    # substring-capable indexes: cjk first (exact ranked match), then trigram (>=3-char
+    # tokens). Gated on a miss so hits keep their ranking ("cat" may then match
+    # "concatenate"). Skipped for role='tool' (both indexes exclude tool rows).
     if not matches and not is_cjk and not (bool(role_filter) and "tool" in role_filter):
         fb_query = _quote_fts_tokens(query.strip('"').strip())
-        if holder._trigram_available and _trigram_eligible_tokens(query):
+        # ── CJK-bigram route (messages_fts_cjk, cjk_unicode61) ────── When the bigram index is
+        # available it serves EVERY CJK query shape the legacy code split between trigram (>=3
+        # chars/token) and LIKE full scans (1-2 char tokens) — the whole point of the index (PR #65544).
+        # Exceptions stay on the legacy routes: - role_filter=['tool'] queries (tool rows aren't in the
+        # cjk index, same exclusion as trigram), - queries containing a LONE 1-char CJK run: the index
+        # stores bigrams for runs >=2, so a single-char term can only match isolated chars — LIKE
+        # substring semantics are broader.
+        if holder._fts_cjk_available:
+            matches = _match_rows(holder, "messages_fts_cjk", fb_query, **route) or matches
+        if not matches and holder._trigram_available and _trigram_eligible_tokens(query):
             matches = _match_rows(holder, "messages_fts_trigram", fb_query, fail_open="Trigram", **route) or matches
 
     # OR-relaxed retry: the implicit AND between terms means a paraphrased multi-word query
@@ -790,11 +795,19 @@ def _search_messages_impl(
 
 def _search_cjk(holder: StoreHolder, query: str, wants_unindexed_rows: bool, route: dict[str, Any]) -> list[dict[str, Any]]:
     """CJK routing: the unicode61 table splits CJK into single characters (false positives,
-    missed phrases). Trigram serves >=3 CJK chars per token unless the query wants rows it
-    excludes (role='tool', cron/subagent sources); everything else is a LIKE substring scan
-    with one clause per non-operator token so "广西 OR 桂林 OR 漓江" matches each term."""
+    missed phrases). cjk-bigram serves every shape except queries wanting rows the
+    substring indexes exclude (role='tool', cron/subagent sources) and LONE
+    1-char CJK runs (bigrams only exist for runs >=2 — LIKE is broader); then trigram
+    (>=3 CJK chars per token); then a LIKE substring scan with one clause per
+    non-operator token so "广西 OR 桂林 OR 漓江" matches each term."""
     raw_query = _strip_cjk_wildcards(query).strip('"').strip()
     match_query = _quote_fts_tokens(raw_query)
+    if holder._fts_cjk_available and not wants_unindexed_rows and not _has_lone_cjk_run(raw_query):
+        matches = _match_rows(holder,
+            "messages_fts_cjk", match_query, fail_open="CJK-bigram",
+            operational_debug="messages_fts_cjk query failed; falling back to trigram/LIKE", **route)
+        if matches is not None:
+            return matches
     if _trigram_route_ok(holder, raw_query) and not wants_unindexed_rows:
         matches = _match_rows(holder, "messages_fts_trigram", match_query, fail_open="Trigram", **route)
         if matches is not None:
@@ -896,3 +909,30 @@ def rebuild_fts(holder: StoreHolder) -> int:
                     else:
                         logger.warning("FTS rebuild failed for %s: %s", tbl, exc)
     return rebuilt
+
+def fts_cjk_rebuild_status(holder: StoreHolder) -> Optional[dict[str, Any]]:
+    """CJK-index backfill progress, or None when none is pending."""
+    return _rebuild_status(holder, "fts_cjk_rebuild")
+
+def _rebuild_status(holder: StoreHolder, prefix: str) -> Optional[dict[str, Any]]:
+    rows = holder._read_all("SELECT key, value FROM state_meta WHERE key IN (?, ?)",
+                          (f"{prefix}_high_water", f"{prefix}_progress"))
+    meta = {r["key"]: r["value"] for r in rows}
+    high_water = meta.get(f"{prefix}_high_water")
+    if high_water is None or int(high_water) <= 0:
+        return None
+    total, progress = int(high_water), int(meta.get(f"{prefix}_progress") or 0)
+    return {"pending": True, "total": total, "indexed": progress, "percent": min(100, int(100 * progress / total))}
+
+def _has_lone_cjk_run(query: str) -> bool:
+    """True when any maximal CJK run is a single char: the cjk-bigram index stores unigrams
+    only for isolated chars, so such a term can't match inside longer runs — keep LIKE."""
+    run = 0
+    for ch in query:
+        if _is_cjk(ord(ch)):
+            run += 1
+        else:
+            if run == 1:
+                return True
+            run = 0
+    return run == 1

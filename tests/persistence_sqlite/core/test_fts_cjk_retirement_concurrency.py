@@ -1,4 +1,4 @@
-"""Retirement is atomic across connections and health checks leave writers free."""
+"""Disposable-copy CJK detachment is atomic; health checks preserve the live index and leave writers free."""
 
 import os
 import sqlite3
@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from persistence.sqlite._holder import StoreHolder
-from persistence.sqlite._schema import drop_retired_cjk_index
+from persistence.sqlite._schema import drop_unavailable_cjk_probe_index
 from persistence.sqlite._state import repair
 from tests.persistence_sqlite.core import test_fts_cjk_index_retirement as retirement
 from tests.persistence_sqlite.core.test_fts_cjk_index_retirement import (
@@ -26,13 +26,13 @@ def test_retirement_excludes_an_interleaved_retirement(cjk_db):
             if sql.startswith("ALTER TABLE messages_fts_cjk_data RENAME"):
                 with sqlite3.connect(cjk_db, isolation_level=None, timeout=0) as second:
                     try:
-                        competing_results.append(drop_retired_cjk_index(second.cursor()))
+                        competing_results.append(drop_unavailable_cjk_probe_index(second.cursor()))
                     except sqlite3.OperationalError as exc:
                         competing_results.append(str(exc))
             return super().execute(sql, parameters)
 
     with sqlite3.connect(cjk_db, isolation_level=None) as first:
-        assert drop_retired_cjk_index(first.cursor(factory=InterleavedCursor))
+        assert drop_unavailable_cjk_probe_index(first.cursor(factory=InterleavedCursor))
         assert not first.in_transaction
     assert competing_results == ["database is locked"]
     StoreHolder(db_path=cjk_db).close()
@@ -79,7 +79,7 @@ def test_failed_retirement_preserves_the_store(cjk_db, outer_transaction):
         if outer_transaction:
             conn.execute("BEGIN IMMEDIATE")
         with pytest.raises(sqlite3.OperationalError, match="injected rename failure"):
-            drop_retired_cjk_index(conn.cursor(factory=FailingCursor))
+            drop_unavailable_cjk_probe_index(conn.cursor(factory=FailingCursor))
         assert conn.in_transaction is outer_transaction
         if outer_transaction:
             conn.rollback()
@@ -90,7 +90,7 @@ def test_successful_retirement_leaves_the_callers_transaction_open(cjk_db):
     before = _store_snapshot(cjk_db)
     with sqlite3.connect(cjk_db, isolation_level=None) as conn:
         conn.execute("BEGIN IMMEDIATE")
-        assert drop_retired_cjk_index(conn.cursor())
+        assert drop_unavailable_cjk_probe_index(conn.cursor())
         assert conn.in_transaction
         conn.rollback()
     assert _store_snapshot(cjk_db) == before
@@ -113,11 +113,11 @@ def test_retirement_rechecks_after_acquiring_the_write_lock(cjk_db):
         def execute(self, sql, parameters=()):
             if sql == "BEGIN IMMEDIATE":
                 with sqlite3.connect(cjk_db, isolation_level=None) as second:
-                    assert drop_retired_cjk_index(second.cursor())
+                    assert drop_unavailable_cjk_probe_index(second.cursor())
             return super().execute(sql, parameters)
 
     with sqlite3.connect(cjk_db, isolation_level=None) as first:
-        assert not drop_retired_cjk_index(first.cursor(factory=InterleavedCursor))
+        assert not drop_unavailable_cjk_probe_index(first.cursor(factory=InterleavedCursor))
         assert not first.in_transaction
     assert _cjk_residue(cjk_db) == []
 
@@ -253,7 +253,7 @@ def test_retirement_succeeds_beside_an_index_whose_tokenizer_is_missing(cjk_db):
         raw.execute(f"PRAGMA schema_version={version + 1}")
         raw.execute("PRAGMA writable_schema=OFF")
     with contextlib.closing(sqlite3.connect(cjk_db, isolation_level=None)) as conn:
-        assert drop_retired_cjk_index(conn.cursor())
+        assert drop_unavailable_cjk_probe_index(conn.cursor())
         assert conn.execute("PRAGMA legacy_alter_table").fetchone()[0] == 0
     assert [name for name in _cjk_residue(cjk_db) if not name.startswith("fts_")] == []
 
@@ -266,7 +266,7 @@ def test_a_copy_failing_its_final_scan_is_not_reported_as_damage(cjk_db, monkeyp
     """Copy and retirement succeed; the copy then turns read-only or unopenable, so only its own scan fails."""
     from persistence.sqlite import _schema
 
-    retire = _schema.drop_retired_cjk_index
+    retire = _schema.drop_unavailable_cjk_probe_index
     frozen = []
 
     def retire_then_freeze(cursor):
@@ -279,7 +279,7 @@ def test_a_copy_failing_its_final_scan_is_not_reported_as_damage(cjk_db, monkeyp
             frozen.append(path.parent)
         return removed
 
-    monkeypatch.setattr(_schema, "drop_retired_cjk_index", retire_then_freeze)
+    monkeypatch.setattr(_schema, "drop_unavailable_cjk_probe_index", retire_then_freeze)
     try:
         reason = repair._db_opens_cleanly(cjk_db)
     finally:
