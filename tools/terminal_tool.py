@@ -1348,6 +1348,9 @@ def _with_promoted_note(result_json: str, requested_timeout: int) -> str:
     if not isinstance(data, dict) or data.get("error"):
         return result_json
     template = _PROMOTED_NOTE if data.get("notify_on_complete") else _PROMOTED_NOTE_POLL_ONLY
+    from tools.prompt_text import tool_text
+    key = "promoted_note" if data.get("notify_on_complete") else "promoted_note_poll_only"
+    template = tool_text(f"tool_results.terminal.{key}", template)
     data["promoted_from_foreground"] = template.format(requested=requested_timeout, cap=FOREGROUND_MAX_TIMEOUT)
     return json.dumps(data, ensure_ascii=False)
 

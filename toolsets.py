@@ -478,9 +478,15 @@ def agent_tool_surface(agent: Any, tools: list[dict[str, Any]]) -> list[dict[str
     before any merge: a pinned or carried entry keeps the bytes already sent."""
     from agent.oneshot_footprint import agent_is_oneshot, oneshot_tool_schemas
     from tools.delegate_tool_config import agent_joins_delegation
+    from tools.prompt_text import agent_tool_text, apply_tool_text
+    from tools.tool_search import assemble_tool_defs
+    from model_tools import _resolve_active_context_length
+    resolve = agent_tool_text(agent)
+    tools = assemble_tool_defs(apply_tool_text(tools, resolve), context_length=_resolve_active_context_length()).tool_defs
     drops = agent_tool_drops(agent)
     tools = [tool for tool in tools if (tool.get("function") or {}).get("name") not in drops] if drops else list(tools)
-    return oneshot_tool_schemas(tools) if agent_is_oneshot(agent) or agent_joins_delegation(agent) else tools
+    tools = oneshot_tool_schemas(tools) if agent_is_oneshot(agent) or agent_joins_delegation(agent) else tools
+    return apply_tool_text(tools, resolve, vault_note=False)
 
 
 def validate_toolset(name: str) -> bool:

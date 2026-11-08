@@ -171,6 +171,51 @@ def test_exact_owner_lineage_validation_and_bounded_jump(timeline_store):
     assert client.get(f"/api/sessions/{sid}/messages/around?row_id={row_id}").status_code == 404
 
 
+@pytest.mark.parametrize("launch_profile", ["default", "work"])
+def test_timeline_notice_headers_use_requested_profile(timeline_store, monkeypatch, launch_profile):
+    db, client, home = timeline_store
+    work = home / "profiles" / "work"
+    work.mkdir(parents=True)
+    headers = {"default": "【本機完成】", "work": "【工作完成】"}
+    for profile, directory in (("default", home), ("work", work)):
+        (directory / "prompt_overrides.yaml").write_text(
+            f'notifications:\n  process:\n    completion: "{headers[profile]} {{session_id}}"\n',
+            encoding="utf-8",
+        )
+    with SessionDB(db_path=work / "state.db") as other:
+        other.create_session(session_id="timeline-root", source="desktop")
+        for profile, store in (("default", db), ("work", other)):
+            foreign = headers["work" if profile == "default" else "default"] + " human wording"
+            store.append_messages_batch("timeline-root", [
+                {"role": "user", "content": headers[profile] + " proc-1"},
+                {"role": "user", "content": "[IMPORTANT: Background process old completed]"},
+                {"role": "user", "content": foreign},
+                {"role": "user", "content": "real human ask"},
+            ])
+    launch_home = home if launch_profile == "default" else work
+    monkeypatch.setenv("HERMES_HOME", str(launch_home))
+    monkeypatch.setattr("hermes_state.DEFAULT_DB_PATH", launch_home / "state.db")
+    # Interleave owners, then the implicit launch profile: no context/cache leakage.
+    for profile in ("work", "default", "work", launch_profile):
+        params = {} if profile == launch_profile else {"profile": profile}
+        response = client.get("/api/sessions/timeline-root/timeline", params=params)
+        assert response.status_code == 200
+        page = response.json()
+        foreign = headers["work" if profile == "default" else "default"] + " human wording"
+        assert page["profile"] == profile
+        assert [row["preview"] for row in page["entries"]] == [foreign, "real human ask"]
+        assert page["pagination"]["total"] == 2
+        # Jump validation must apply the same owner-specific notice classification.
+        for row_id in (1, 2):
+            jump = client.get("/api/sessions/timeline-root/messages/around", params={
+                **params, "row_id": row_id})
+            assert jump.status_code == 404
+        jump = client.get("/api/sessions/timeline-root/messages/around", params={
+            **params, "row_id": page["entries"][0]["row_id"]})
+        assert jump.status_code == 200
+        assert jump.json()["messages"][0]["content"] == foreign
+
+
 def test_timeline_sql_never_reads_tool_columns_or_writes(timeline_store, monkeypatch):
     import sqlite3
     from contextlib import contextmanager

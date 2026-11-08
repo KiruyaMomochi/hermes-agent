@@ -94,6 +94,11 @@ INTERNAL_NOTIFICATION_FOOTER = (
 )
 
 
+def _internal_notification_footer() -> str:
+    from tools.prompt_text import tool_text
+    return tool_text("notifications.gateway.internal_footer", INTERNAL_NOTIFICATION_FOOTER)
+
+
 def _mark_internal_notification(text: str) -> str:
     """Append unambiguous machine provenance to model-facing notification text (#52694).
 
@@ -105,9 +110,10 @@ def _mark_internal_notification(text: str) -> str:
     Idempotent so a retried delivery never stacks footers.
     """
     text = text.rstrip()
-    if text.endswith(INTERNAL_NOTIFICATION_FOOTER):
+    footer = _internal_notification_footer()
+    if not footer.strip() or text.endswith((footer.rstrip(), INTERNAL_NOTIFICATION_FOOTER)):
         return text
-    return text + "\n\n" + INTERNAL_NOTIFICATION_FOOTER
+    return text + "\n\n" + footer
 
 
 def _held_reason(source, platform: str, multiplexed: bool) -> str:

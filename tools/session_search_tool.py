@@ -423,7 +423,9 @@ def _discover(db, query: str, role_filter: Optional[list[str]], limit: int, sort
             results.append(entry)
     for entry in results:
         entry["link"] = _session_link(entry["session_id"], link_profile)
-    return _discover_payload(db, query, detail, results, sessions_searched=len(seen_sessions), link_hint=(
+    from tools.prompt_text import tool_text
+    return _discover_payload(db, query, detail, results, sessions_searched=len(seen_sessions), link_hint=tool_text(
+        "tool_results.session_search.link_hint",
         "When referring the user to a session, write its `link` value "
         "verbatim inline mid-sentence (it renders as a titled link) — never "
         "as markdown, in backticks, on its own line, or next to the "

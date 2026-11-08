@@ -288,7 +288,8 @@ def _run_sync_with_note(batch: _Batch, reason: str) -> str:
     """Inline fallback: run the batch now and explain why it was not detached."""
     result = _execute_and_aggregate(batch)
     if isinstance(result, dict):
-        result["note"] = _SYNC_FALLBACK_NOTES[reason]
+        from tools.prompt_text import tool_text
+        result["note"] = tool_text(f"tool_results.delegate_task.{reason}", _SYNC_FALLBACK_NOTES[reason])
     return json.dumps(result, ensure_ascii=False)
 
 def _resolve_async_wake_sid(
@@ -404,10 +405,12 @@ def _dispatched_payload(batch: _Batch, units: list[tuple[_Batch, str]]) -> dict:
     """Model-facing handle for an accepted background call: one entry per async unit."""
     goals = [t["goal"] for t in batch.task_list]
     n = len(batch.children)  # running children; refused tasks are listed under "refused"
+    from tools.prompt_text import tool_text
+    notes = {key: tool_text(f"tool_results.delegate_task.{key}", value) for key, value in _BACKGROUND_NOTES.items()}
     payload = {
         "status": "dispatched", "mode": "background", "count": n,
         "delegation_id": batch.live_deleg_id or units[0][1], "goals": goals,
-        "note": _BACKGROUND_NOTES["one"] if n == 1 else _BACKGROUND_NOTES["many"].format(n=n, k=len(units)),
+        "note": notes["one"] if n == 1 else notes["many"].format(n=n, k=len(units)),
     }
     if len(units) > 1:
         payload["units"] = [
@@ -417,12 +420,12 @@ def _dispatched_payload(batch: _Batch, units: list[tuple[_Batch, str]]) -> dict:
     sids = [getattr(c, "_subagent_id", None) for (_, _, c) in batch.children]
     if any(isinstance(s, str) and s for s in sids):
         payload["subagent_ids"] = sids
-        payload["control_hint"] = _BACKGROUND_NOTES["control_hint"]
+        payload["control_hint"] = notes["control_hint"]
     if batch.refused:
         payload["refused"] = batch.refused
     if batch.live_paths:
         payload["live_transcripts"] = list(batch.live_paths)
-        payload["live_transcripts_hint"] = _BACKGROUND_NOTES["live_transcripts_hint"]
+        payload["live_transcripts_hint"] = notes["live_transcripts_hint"]
     return payload
 
 def _units_of(batch: _Batch) -> list[_Batch]:

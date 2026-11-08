@@ -7,6 +7,8 @@ import time
 from dataclasses import dataclass
 from contextlib import suppress
 
+from tools.notice_text import notice_text
+
 _DONE = ("completed", "success")
 _REASON_STATUS = {"lost": "marked lost because the process backend disappeared", "failed_start": "failed to start"}
 
@@ -255,7 +257,7 @@ def _format_task_failure_notice(evt: dict, deleg_id: str) -> str:
     goal = goals[idx] if idx < len(goals) else r.get("goal", "")
     err = str(r.get("error") or "").strip().replace("\n", " ")[:400]
     lines = [
-        f"[ASYNC DELEGATION TASK FAILED — {deleg_id}, task {idx + 1}/{n}]",
+        notice_text("async_delegation.task_failed_header").format(deleg_id=deleg_id, task_number=idx + 1, n_tasks=n),
         "One subagent in a background fan-out you dispatched has failed while its siblings are still running. "
         "The batch's consolidated results will still arrive when the last sibling finishes; this is an early "
         "warning so you can re-dispatch or investigate now instead of then.",
@@ -290,14 +292,16 @@ def _format_batch_delegation(evt: dict, deleg_id: str, completed_at: float) -> s
     # ``goals`` is the whole delegate_task call (task_index indexes it); ``results`` is this unit's subset.
     n, n_unit = len(goals) or len(results), len(results) or len(goals)
     group = evt.get("group")
+    from tools.prompt_text import tool_text
     unit = f"group '{group}' ({n_unit} subagent(s))" if group is not None else f"{n_unit} subagent(s)"
     lines = _preamble(
         evt,
-        f"[ASYNC DELEGATION BATCH COMPLETE — {deleg_id}]",
-        f"A background fan-out unit you dispatched earlier — {unit} — has finished; its consolidated results are "
+        notice_text("async_delegation.batch_header").format(deleg_id=deleg_id),
+        tool_text("notifications.async_delegation.batch_body",
+        "A background fan-out unit you dispatched earlier — {unit} — has finished; its consolidated results are "
         "below. Any other units from the same delegate_task call report separately as they finish. You may have "
         "moved on since dispatching — act on these or re-dispatch if things have changed. If you are still waiting "
-        "on siblings, end your turn after acting on this one.",
+        "on siblings, end your turn after acting on this one.").format(unit=unit),
         completed_at, with_goal=False)
     lines[-1] += f"   Total duration: {evt.get('total_duration_seconds', evt.get('duration_seconds', '?'))}s"
     lines += _recovery_lines(evt)
@@ -369,12 +373,13 @@ def _format_async_delegation(evt: dict) -> str:
         return _format_batch_delegation(evt, deleg_id, completed_at)
     status, summary, error = evt.get("status") or "completed", evt.get("summary"), evt.get("error")
     truncated = _is_truncated(evt)
+    from tools.prompt_text import tool_text
     lines = _preamble(
         evt,
-        f"[ASYNC DELEGATION COMPLETE — {deleg_id}]",
-        "A background subagent you dispatched earlier has finished. You may "
+        notice_text("async_delegation.header").format(deleg_id=deleg_id),
+        tool_text("notifications.async_delegation.body", "A background subagent you dispatched earlier has finished. You may "
         "have moved on since dispatching it; the full task source is below so "
-        "you can act on the result or re-dispatch if things have changed.",
+        "you can act on the result or re-dispatch if things have changed."),
         completed_at, with_goal=True)
     lines += _notice_lines([evt]) + [
         f"Status: {status}" + (f"   API calls: {evt['api_calls']}" if evt.get("api_calls") is not None else "")
@@ -565,8 +570,8 @@ def format_process_notification(evt: dict) -> str | None:
     if evt_type == "watch_match":
         _sup = evt.get("suppressed", 0)
         return (
-            f"[IMPORTANT: Background process {_sid} matched watch pattern \"{evt.get('pattern', '?')}\".\n"
-            f"{attribution}Command: {_cmd}\nMatched output:\n{evt.get('output', '')}"
+            notice_text("process.watch_header").format(session_id=_sid, pattern=evt.get('pattern', '?'))
+            + f"{attribution}Command: {_cmd}\nMatched output:\n{evt.get('output', '')}"
             + (f"\n({_sup} earlier matches were suppressed by rate limit)" if _sup else "") + "]")
     _exit = evt.get("exit_code", "?")
     _out = evt.get("output", "")
@@ -582,6 +587,6 @@ def format_process_notification(evt: dict) -> str | None:
         # Say so where the output is the payload (a teammate's reply): a silent tail reads as whole.
         _out = (f"...(first {evt['output_cut']} characters cut — process(action=\"log\", "
                 f"session_id=\"{_sid}\") has the full output)\n{_out}")
-    return (
-        f"[IMPORTANT: Background process {_sid} {_completion_status(evt)} (exit code {_exit}{_signal}).\n"
-        f"{attribution}Command: {_cmd}\nOutput:\n{_out}]")
+    return notice_text("process.completion").format(
+            session_id=_sid, status=_completion_status(evt), exit_code=_exit, signal=_signal,
+            attribution=attribution, command=_cmd, output=_out)

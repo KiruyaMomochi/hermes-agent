@@ -3048,13 +3048,13 @@ def _format_gateway_process_notification(evt: dict) -> str | None:
         return f"[IMPORTANT: {evt.get('message', '')}]"
 
     if evt_type == "watch_match":
+        from tools.notice_text import notice_text
         _pat = evt.get("pattern", "?")
         _out = evt.get("output", "")
         _sup = evt.get("suppressed", 0)
         text = (
-            f"[IMPORTANT: Background process {_sid} matched "
-            f"watch pattern \"{_pat}\".\n"
-            f"Command: {_cmd}\nMatched output:\n{_out}")
+            notice_text("process.watch_header").format(session_id=_sid, pattern=_pat)
+            + f"Command: {_cmd}\nMatched output:\n{_out}")
         if _sup:
             text += f"\n({_sup} earlier matches were suppressed by rate limit)"
         text += "]"

@@ -52,6 +52,7 @@ from agent.context_default_record import last_defaulted_context_length
 from agent.redact import redact_sensitive_text
 from agent.turn_context import drop_stale_api_content
 from tools.todo_tool import TODO_INJECTION_HEADER
+from tools.notice_text import notice_prefixes
 
 logger = logging.getLogger(__name__)
 
@@ -344,7 +345,6 @@ MAX_ITERATIONS_SUMMARY_REQUEST = (
     "You've reached the maximum number of tool-calling iterations allowed. Please provide a final response "
     "summarizing what you've found and accomplished so far, without calling any more tools."
 )
-_BACKGROUND_PROCESS_NOTIFICATION_PREFIX = "[IMPORTANT: Background process "
 
 
 def _fresh_compaction_message_copy(msg: dict[str, Any]) -> dict[str, Any]:
@@ -942,7 +942,7 @@ def _synthetic_user_row(content: str) -> bool:
     """True for scaffolding user rows that carry no real user words."""
     if not isinstance(content, str) or not content.strip():
         return True
-    return content.lstrip().startswith(_SYNTHETIC_USER_ROW_PREFIXES)
+    return content.lstrip().startswith(_SYNTHETIC_USER_ROW_PREFIXES + notice_prefixes())
 
 
 def _typed_user_text(content: str) -> str:
@@ -4254,8 +4254,8 @@ Write only the summary body. Do not include any preamble or prefix."""
             _LENGTH_CONTINUATION_NETWORK_STUB, _LEGACY_LENGTH_CONTINUATION_NETWORK_STUB,
             _LENGTH_CONTINUATION_OUTPUT_LIMIT,
         } or text.startswith((
-            _BACKGROUND_PROCESS_NOTIFICATION_PREFIX, TODO_INJECTION_HEADER + "\n", _LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX,
-        ))
+            TODO_INJECTION_HEADER + "\n", _LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX,
+        ) + notice_prefixes("process"))
 
     @staticmethod
     def _validate_summary_user_provenance(summary: str, has_user_turn: bool) -> None:

@@ -1362,10 +1362,11 @@ class _ConcurrentBatch:
         blocked = dispatched = False
         data_use: frozenset[str] = frozenset()
         try:
+            from tools.prompt_text import invoke_with_tool_text
             managed = _run_agent_tool_execution_middleware(
                 agent,
                 **ref.middleware_kwargs(),
-                execute=lambda next_args: agent._invoke_tool(
+                execute=lambda next_args: invoke_with_tool_text(agent, agent._invoke_tool,
                     ref.name, next_args, ref.task_id, ref.call_id,
                     messages=self.messages,
                     pre_tool_block_checked=True,
@@ -1731,7 +1732,8 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
     def _execute(next_args: dict) -> Any:
         import model_tools
 
-        with model_tools.suppress_post_tool_call_hook():
+        from tools.prompt_text import tool_text_scope
+        with model_tools.suppress_post_tool_call_hook(), tool_text_scope(agent):
             return model_tools.handle_function_call(
                 function_name,
                 next_args,

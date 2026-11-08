@@ -87,9 +87,10 @@ def with_skill_advisory(handler):
                     while len(_seen) > 128:
                         _seen.popitem(last=False)
             if names:
-                payload["_skill_advisory"] = (
-                    f"Relevant skills available: {', '.join(names)}. "
-                    "Load one with `skill_view` if applicable.")
+                from tools.prompt_text import tool_text
+                payload["_skill_advisory"] = tool_text("tool_results.file_skill_advisory",
+                    "Relevant skills available: {names}. "
+                    "Load one with `skill_view` if applicable.").format(names=', '.join(names))
                 return json.dumps(payload, ensure_ascii=False)
         except Exception:
             logger.debug("Could not add file-path skill advisory", exc_info=True)

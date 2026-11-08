@@ -103,13 +103,16 @@ def _apply_char_budget(result_dict: dict, content: str, offset: int, total_lines
     result_dict["truncated"] = True
     result_dict["truncated_by"] = "bytes"
     result_dict["next_offset"] = next_offset
-    result_dict["hint"] = (
-        f"Output truncated at the {max_chars:,}-char read budget after "
-        f"{lines_kept} line(s) (showing lines {offset}-{next_offset - 1} of "
-        f"{total_lines}). Use offset={next_offset} to continue.")
+    from tools.prompt_text import tool_text
+    result_dict["hint"] = tool_text("tool_results.read_file.char_budget_hint",
+        "Output truncated at the {max_chars:,}-char read budget after "
+        "{lines_kept} line(s) (showing lines {offset}-{end_line} of "
+        "{total_lines}). Use offset={next_offset} to continue.").format(
+            max_chars=max_chars, lines_kept=lines_kept, offset=offset, end_line=next_offset - 1,
+            total_lines=total_lines, next_offset=next_offset)
     if len(trimmed.split("\n", 1)[0]) >= max_chars:
         result_dict["truncated_lines"] = True
-        result_dict["hint"] += (
+        result_dict["hint"] += tool_text("tool_results.read_file.long_line_hint",
             " Note: the first line alone exceeded the budget and was "
             "clamped mid-line; its remainder is not retrievable via offset.")
     return trimmed
@@ -470,9 +473,11 @@ def _read_extracted_document(path: str, _resolved, offset: int, limit: int, task
         "truncated": total_lines > end_line,
         "extracted_document": True}
     if result_dict["truncated"]:
-        result_dict["hint"] = (
-            f"Use offset={end_line + 1} to continue reading "
-            f"(showing {offset}-{min(end_line, total_lines)} of {total_lines} lines)")
+        from tools.prompt_text import tool_text
+        result_dict["hint"] = tool_text("tool_results.read_file.continue_hint",
+            "Use offset={next_offset} to continue reading "
+            "(showing {offset}-{end_line} of {total_lines} lines)").format(
+                next_offset=end_line + 1, offset=offset, end_line=min(end_line, total_lines), total_lines=total_lines)
     max_chars = _get_max_read_chars()
     if len(result_dict["content"]) > max_chars:
         _apply_char_budget(result_dict, result_dict["content"], offset, total_lines, max_chars)
@@ -719,16 +724,18 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
             conflicts = count_conflict_blocks(result.content)
             if conflicts:
                 result_dict["conflict_blocks"] = conflicts
-                result_dict["_hint"] = (
-                    f"{conflicts} unresolved git merge-conflict block(s) (<<<<<<< / ======= / >>>>>>>) in this "
-                    "range. Resolve them (keep one side or combine, delete the markers) before editing around them.")
+                from tools.prompt_text import tool_text
+                result_dict["_hint"] = tool_text("tool_results.read_file.conflict_hint",
+                    "{conflicts} unresolved git merge-conflict block(s) (<<<<<<< / ======= / >>>>>>>) in this "
+                    "range. Resolve them (keep one side or combine, delete the markers) before editing around them.").format(conflicts=conflicts)
 
         if (file_size and file_size > _LARGE_FILE_HINT_BYTES
                 and limit > 200 and result_dict.get("truncated")):
-            result_dict.setdefault("_hint", (
-                f"This file is large ({file_size:,} bytes). "
+            from tools.prompt_text import tool_text
+            result_dict.setdefault("_hint", tool_text("tool_results.read_file.large_file_hint",
+                "This file is large ({file_size:,} bytes). "
                 "Consider reading only the section you need with offset and limit "
-                "to keep context usage efficient."))
+                "to keep context usage efficient.").format(file_size=file_size))
 
         total_lines = result_dict.get("total_lines")
         if result_dict.get("truncated_by") == "bytes":

@@ -54,25 +54,43 @@ _TOOL_ERROR_TRUNCATION_MARKER = "… [truncated]"
 _MAX_LOGGED_ERROR_CHARS = 8192
 
 
+_prompt_override_lock = threading.Lock()
+
+
+@functools.lru_cache(maxsize=32)
+def _read_prompt_overrides(path, mtime_ns, size):
+    from hermes_yaml import safe_load
+    with path.open("r", encoding="utf-8-sig") as fh:
+        value = safe_load(fh)
+    return value if isinstance(value, dict) else {}
+
+
+def _prompt_override_data():
+    try:
+        path = Path(get_hermes_home()) / "prompt_overrides.yaml"
+        stat = path.stat()
+        with _prompt_override_lock:
+            return _read_prompt_overrides(path, stat.st_mtime_ns, stat.st_size)
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        logger.debug("Failed to load prompt overrides: %s", exc, exc_info=True)
+        return {}
+
+
+def _prompt_override_value(value, key):
+    for part in key.split("."):
+        value = value.get(part) if isinstance(value, dict) else None
+    return value if isinstance(value, str) else None
+
+
 def prompt_override(key: str) -> Optional[str]:
     """Return a string override from the profile's prompt_overrides.yaml, if set.
 
     Dotted keys walk nested maps (``tool_descriptions.browser_exec``). Read at
     schema-build time so each profile gets its own file.
     """
-    try:
-        path = Path(get_hermes_home()) / "prompt_overrides.yaml"
-        if not path.is_file():
-            return None
-        with path.open("r", encoding="utf-8") as fh:
-            from hermes_yaml import safe_load
-            value = safe_load(fh)
-        for part in key.split("."):
-            value = value.get(part) if isinstance(value, dict) else None
-        return value if isinstance(value, str) else None
-    except Exception as exc:
-        logger.debug("Failed to load prompt override %s: %s", key, exc)
-        return None
+    return _prompt_override_value(_prompt_override_data(), key)
 
 
 def _bound_error_text(text: str) -> str:
@@ -1079,9 +1097,7 @@ class ToolRegistry:
                         name, exc)
                 if isinstance(overrides, dict):
                     schema_with_name.update(overrides)
-            description_override = prompt_override(f"tool_descriptions.{entry.name}")
-            if description_override is not None:
-                schema_with_name["description"] = description_override
+
             result.append({"type": "function", "function": schema_with_name})
         return result
 

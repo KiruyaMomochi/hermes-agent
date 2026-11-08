@@ -308,7 +308,7 @@ def _build_child_agent(
         from agent.conversation_compression_checkpoint import checkpoint_required_from_config
 
         child_checkpoint_required = checkpoint_required_from_config()
-        with delegated_child_context():
+        with delegated_child_context(profile_home=profile_home):
             try:
                 child = AIAgent(
                     **rt, max_iterations=max_iterations, prefill_messages=getattr(parent_agent, "prefill_messages", None),

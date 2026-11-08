@@ -469,10 +469,8 @@ def _rewrite_input_tool_for_vault(td: dict[str, Any], available: set) -> Optiona
     the page). Say it where the temptation is."""
     if "browser_vault" not in available:
         return td
-    from tools.registry import prompt_override
-    note = prompt_override("VAULT_NO_PASSWORD_NOTE")
     fn = td["function"]
-    note = _VAULT_NO_PASSWORD_NOTE if note is None else note
+    note = _VAULT_NO_PASSWORD_NOTE
     if fn["name"] == "drive_preview":
         note += " For this in-app page pass target=preview (the default when no managed browser page is open)."
     return _fn_def({**fn, "description": fn.get("description", "") + note})
@@ -748,6 +746,8 @@ def _dispatch_bridge_tool(function_name: str, function_args: dict[str, Any],
     try:
         current_defs = get_tool_definitions(enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
                                             quiet_mode=True, skip_tool_search_assembly=True) or []
+        from tools.prompt_text import apply_tool_text
+        current_defs = apply_tool_text(current_defs)
     except Exception:
         current_defs = []
     args = function_args or {}

@@ -9,6 +9,7 @@ from agent.compaction_display import project_compaction_message_for_display
 from agent.context_compressor import user_originated_turn_view
 from hermes_state_compaction_display import not_a_later_tool_copy_sql
 from hermes_state_messages import DISPLAY_VISIBLE_SQL
+from tools.notice_text import notice_prefixes
 
 
 _SYNTHETIC_PROMPT = re.compile(
@@ -32,6 +33,8 @@ def _prompt_preview(db, content, display_kind, summary):
             part if isinstance(part, str) else part.get("text", "")
             for part in content if isinstance(part, (str, dict)))
     if not isinstance(content, str):
+        return ""
+    if content.lstrip().startswith(notice_prefixes()):
         return ""
     text = " ".join(content.split())
     if not text or _SYNTHETIC_PROMPT.match(text):

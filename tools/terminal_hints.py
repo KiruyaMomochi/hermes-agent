@@ -143,7 +143,10 @@ def annotate_masked_success(command: str, output: str) -> Optional[str]:
     if (not cmd or not window or _first_token(cmd) in _READONLY_HEADS
             or not _FAILURE_SHAPES.search(window)):
         return None
-    return next((note for rx, note in _MASKING_SHAPES if rx.search(cmd)), None)
+    from tools.prompt_text import tool_text
+    keys = ("pipeline_masked_success", "fallback_masked_success")
+    return next((tool_text(f"tool_results.terminal.{key}", note)
+                 for key, (rx, note) in zip(keys, _MASKING_SHAPES) if rx.search(cmd)), None)
 
 
 def annotate_failure(command: str, exit_code: int, output: str) -> Optional[str]:

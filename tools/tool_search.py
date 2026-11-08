@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from hermes_cli.config_defaults import DEFAULT_CONFIG
 from tools.registry import tool_error
+from tools.prompt_text import tool_text
 from toolsets import CLIENT_SURFACE_TOOLSETS, TOOLSET_SESSION_PLATFORMS
 from tools.tool_search_catalog import (
     BRIDGE_TOOL_NAMES, CHARS_PER_TOKEN, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME,
@@ -238,36 +239,57 @@ _CONNECTIONS_HINT = (
     "or connects an account and installs MCP servers.")
 
 
+def _search_frame(part: str, default: str) -> str:
+    """Profile wording for one framing piece of the tool_search description.
+
+    The description is assembled around a live listing, so a whole-description
+    override would freeze the listing; profiles override the pieces instead
+    (``tool_descriptions.tool_search.frame.<part>``) with ``{count}``, ``{search}``,
+    ``{describe}`` and ``{call}`` placeholders."""
+    from tools.prompt_text import _schema_text
+    resolve = _schema_text.get()
+    key = f"tool_descriptions.{TOOL_SEARCH_NAME}.frame.{part}"
+    value = resolve(key) if resolve is not None else tool_text(key, None)
+    return default if value is None else value
+
+
 def _search_description(deferred_count: int, listing: Optional[str], listing_form: str,
                         connections_granted: bool = False) -> str:
     """tool_search bridge description with the listing embedded (framing per ``listing_form``).
     ``connections_granted`` adds the one sentence that ties ``connectors__`` names to
     ``manage_connections``; without that tool in the session the sentence would name a tool
     the model cannot call."""
+    names = {"count": deferred_count, "search": TOOL_SEARCH_NAME,
+             "describe": TOOL_DESCRIBE_NAME, "call": TOOL_CALL_NAME}
+
+    def frame(part: str, default: str) -> str:
+        return _search_frame(part, default).format(**names)
+
     desc = (
-        (f"Search {deferred_count} additional tools that are loaded on demand. "
-         if deferred_count else "Search remote connector tools (email, calendars, issue trackers, and more). ")
-        + "Send one keyword query per capability you need; returns matching tool names "
-        f"and descriptions. Then `{TOOL_DESCRIBE_NAME}` loads schemas and `{TOOL_CALL_NAME}` "
-        "invokes. Tools already in your tool list need no search."
-        + (_CONNECTIONS_HINT if connections_granted else ""))
+        (frame("intro", "Search {count} additional tools that are loaded on demand. ")
+         if deferred_count else
+         frame("intro_remote", "Search remote connector tools (email, calendars, issue trackers, and more). "))
+        + frame("usage", "Send one keyword query per capability you need; returns matching tool names "
+                "and descriptions. Then `{describe}` loads schemas and `{call}` "
+                "invokes. Tools already in your tool list need no search.")
+        + (frame("connections", _CONNECTIONS_HINT) if connections_granted else ""))
     if not listing:
         return desc
     if listing_form == "groups":
-        return desc + (
+        return desc + frame("groups", (
             "\n\nThe servers below are connected and their tools ARE available "
             "through this bridge. For any request in these domains, search "
             "here FIRST — do not claim the capability is unavailable and do "
             "not substitute a generic tool (terminal/browser) without "
-            "searching.\n\n" + listing)
-    desc += (
+            "searching.\n\n")) + listing
+    desc += frame("listed", (
         "\n\nEvery tool listed below exists: never call it unavailable, and go straight to "
-        f"`{TOOL_DESCRIBE_NAME}` when you see the exact name.")
+        "`{describe}` when you see the exact name."))
     if listing_form == "mixed":
-        desc += (
+        desc += frame("mixed", (
             " For servers marked 'names not listed', the tools exist "
-            f"too — find them with `{TOOL_SEARCH_NAME}` before "
-            "concluding anything is missing.")
+            "too — find them with `{search}` before "
+            "concluding anything is missing."))
     return desc + "\n\n" + listing
 
 
@@ -404,8 +426,11 @@ def _shared_tool_record(entry: CatalogEntry) -> dict[str, Any]:
         required = entry.schema["function"]["parameters"]["required"]
     except (TypeError, KeyError, AttributeError):
         required = []
+    from tools.prompt_text import apply_tool_text
+    description = apply_tool_text([{"function": {"name": entry.name, "description": entry.description}}],
+                                  vault_note=False)[0]["function"]["description"]
     return {"source": entry.source, "source_name": entry.source_name,
-            "description": _clip_description(entry.description or ""),
+            "description": _clip_description(description or ""),
             "required": [r[:64] for r in (required if isinstance(required, list) else [])
                          if isinstance(r, str)][:32]}
 
@@ -469,7 +494,7 @@ def dispatch_tool_search(args: dict[str, Any], *, current_tool_defs: list[dict[s
         group: dict[str, Any] = {"query": query, "matches": matches}
         if not matches and available_sources:
             group["available_sources"] = available_sources
-            group["hint"] = (
+            group["hint"] = tool_text("tool_results.tool_search.no_matches_hint",
                 "This query returned no lexical matches, but the sources above "
                 "are connected and their tools remain available. Retry "
                 "tool_search with the service name plus a concrete action or "
@@ -521,6 +546,8 @@ def dispatch_tool_describe(args: dict[str, Any], *, current_tool_defs: list[dict
             tools[name] = {"description": fn.get("description", ""),
                            "parameters": fn.get("parameters", {})}
         elif isinstance(remote_fn, dict):
+            from tools.prompt_text import apply_tool_text
+            remote_fn = apply_tool_text([{"function": {**remote_fn, "name": name}}])[0]["function"]
             tools[name] = {"description": str(remote_fn.get("description", "")),
                            "parameters": remote_fn.get("parameters", {})}
         elif is_connector_name(name):
@@ -537,7 +564,8 @@ def dispatch_tool_describe(args: dict[str, Any], *, current_tool_defs: list[dict
     result: dict[str, Any] = {"tools": tools}
     if not_found:
         result["not_found"] = not_found
-        result["hint"] = "Names in not_found are not currently available. Re-run tool_search to refresh."
+        result["hint"] = tool_text("tool_results.tool_describe.not_found_hint",
+                                  "Names in not_found are not currently available. Re-run tool_search to refresh.")
     if errors:
         result["errors"] = errors
     if hosted_failure:

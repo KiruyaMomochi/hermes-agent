@@ -16,7 +16,8 @@ registry.register(
 
 
 def _description() -> str:
-    definitions = registry.get_definitions({_TEST_TOOL}, quiet=True)
+    from tools.prompt_text import apply_tool_text
+    definitions = apply_tool_text(registry.get_definitions({_TEST_TOOL}, quiet=True))
     return next(item["function"]["description"] for item in definitions)
 
 
@@ -47,7 +48,8 @@ def test_vault_note_on_input_tools_follows_profile_override(tmp_path, monkeypatc
     (Path(tmp_path) / "prompt_overrides.yaml").write_text(
         safe_dump({"VAULT_NO_PASSWORD_NOTE": " profile note"}), encoding="utf-8"
     )
-    overridden = _rewrite_input_tool_for_vault(td, {"browser_vault"})["function"]["description"]
+    from tools.prompt_text import apply_tool_text
+    overridden = apply_tool_text([_rewrite_input_tool_for_vault(td, {"browser_vault"})])[0]["function"]["description"]
 
     assert overridden == "Type text. profile note"
     assert default != overridden

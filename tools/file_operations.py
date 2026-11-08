@@ -807,9 +807,12 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         hint_parts = [f"Transcoded from {encoding.upper()} to UTF-8 for display. "
                       "Text edits via patch/write_file would re-encode as UTF-8."]
         if truncated:
+            from tools.prompt_text import tool_text
             hint_parts.append(
-                f"Use offset={end_line + 1} to continue reading "
-                f"(showing {offset}-{end_line} of {total_lines} lines)")
+                tool_text("tool_results.read_file.continue_hint",
+                    "Use offset={next_offset} to continue reading "
+                    "(showing {offset}-{end_line} of {total_lines} lines)").format(
+                        next_offset=end_line + 1, offset=offset, end_line=end_line, total_lines=total_lines))
         from tools.tool_output_limits import get_max_line_length
         max_line_length = get_max_line_length()
         truncated_lines = any(len(line) > max_line_length for line in content.split('\n'))
@@ -1150,7 +1153,10 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         truncated = total_lines > end_line
         hint = None
         if truncated:
-            hint = f"Use offset={end_line + 1} to continue reading (showing {offset}-{end_line} of {total_lines} lines)"
+            from tools.prompt_text import tool_text
+            hint = tool_text("tool_results.read_file.continue_hint",
+                "Use offset={next_offset} to continue reading (showing {offset}-{end_line} of {total_lines} lines)").format(
+                    next_offset=end_line + 1, offset=offset, end_line=end_line, total_lines=total_lines)
 
         # ``cut`` always newline-terminates, so a file without a trailing newline
         # would grow a phantom empty last line; strip it when the last byte says so.
