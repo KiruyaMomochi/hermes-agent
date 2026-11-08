@@ -1,5 +1,4 @@
-"""A state.db that an earlier release gave the cjk_unicode61 index opens without it: the index, its triggers
-and its markers are dropped, so writers that never load the tokenizer (the sqlite3 CLI) can write again."""
+"""Unavailable CJK indexes are preserved on open and isolated on disposable repair-probe copies."""
 
 import argparse
 import sqlite3
@@ -19,8 +18,9 @@ def _outside_insert(db_path) -> None:
 
 
 @pytest.fixture
-def cjk_db(tmp_path):
+def cjk_db(tmp_path, monkeypatch):
     """The on-disk shape of a built index, as seen by a process that cannot load the tokenizer."""
+    monkeypatch.setenv("HERMES_CJK_FTS", "0")
     db_path = tmp_path / "state.db"
     db = SessionDB(db_path=db_path)
     db.create_session("s1", source="cli", model="m")
@@ -58,27 +58,23 @@ def _cjk_residue(db_path) -> list:
         return [row[0] for row in (*objects.fetchall(), *markers.fetchall())]
 
 
-def test_open_drops_the_cjk_index_and_restores_outside_writers(cjk_db):
+def test_open_preserves_unavailable_index_and_restores_outside_writers(cjk_db):
+    before = set(_cjk_residue(cjk_db))
     SessionDB(db_path=cjk_db).close()
-
-    assert _cjk_residue(cjk_db) == []
+    assert set(_cjk_residue(cjk_db)) == before - set(_CJK_TRIGGERS)
     _outside_insert(cjk_db)
-    with sqlite3.connect(cjk_db) as raw:
-        assert raw.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 
-def test_a_second_open_finds_nothing_to_drop(cjk_db, caplog):
+def test_second_open_preserves_unavailable_index(cjk_db):
     SessionDB(db_path=cjk_db).close()
-    caplog.clear()
-
+    before = _store_snapshot(cjk_db)
     db = SessionDB(db_path=cjk_db)
     try:
         db.append_message("s1", "user", "서울")
         assert db.search_messages("东京都")
     finally:
         db.close()
-    assert _cjk_residue(cjk_db) == []
-    assert not [r for r in caplog.records if "messages_fts_cjk" in r.getMessage()]
+    assert _store_snapshot(cjk_db) == before
 
 
 def _store_snapshot(db_path) -> tuple:
@@ -94,34 +90,4 @@ def test_repair_check_only_leaves_the_store_unchanged(cjk_db, monkeypatch):
     assert not sessions_cmd._cmd_repair(argparse.Namespace(check_only=True, no_backup=False))
 
     assert _store_snapshot(cjk_db) == before
-    SessionDB(db_path=cjk_db).close()
-    assert _cjk_residue(cjk_db) == []
-
-
-def test_open_finishes_an_interrupted_removal_once(cjk_db, caplog):
-    with sqlite3.connect(cjk_db) as raw:
-        for trigger in _CJK_TRIGGERS:
-            raw.execute(f"DROP TRIGGER {trigger}")
-        raw.execute("PRAGMA writable_schema=ON")
-        raw.execute("DELETE FROM sqlite_master WHERE name = 'messages_fts_cjk'")
-        raw.execute("PRAGMA writable_schema=RESET")
-    assert _cjk_residue(cjk_db)
-
-    SessionDB(db_path=cjk_db).close()
-    assert _cjk_residue(cjk_db) == []
-    caplog.clear()
-    SessionDB(db_path=cjk_db).close()
-    assert not [r for r in caplog.records if "messages_fts_cjk" in r.getMessage()]
-
-
-def test_open_stages_the_index_for_chunked_teardown(cjk_db):
-    db = SessionDB(db_path=cjk_db)
-    try:
-        staged = [r[0] for r in db._conn.execute(
-            "SELECT name FROM sqlite_master WHERE name LIKE 'fts\\_v22\\_trash\\_messages\\_fts\\_cjk\\_%' ESCAPE '\\'")]
-        assert "fts_v22_trash_messages_fts_cjk_data" in staged
-        assert db.fts_optimize_available()
-        assert db.optimize_fts_storage(vacuum=False)["ok"]
-        assert not db._has_fts_trash(db._conn)
-    finally:
-        db.close()
+    assert "messages_fts_cjk" in _cjk_residue(cjk_db)

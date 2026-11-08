@@ -66,7 +66,7 @@ _FINGERPRINT_VOLATILE_HEADER_RANGES = ((24, 28), (92, 96))
 # the volume, clamped to a modest floor. See #69603.
 _REPAIR_BACKUP_MIN_FREE_BYTES = 256 * 1024 * 1024  # 256 MiB absolute floor
 _REPAIR_BACKUP_FREE_FRACTION = 0.02  # plus 2% of the volume
-_FTS_TABLES = ("messages_fts", "messages_fts_trigram")
+_FTS_TABLES = ("messages_fts", "messages_fts_trigram", "messages_fts_cjk")
 _MANUAL_RECOVER_HINT = ("Free disk space, then retry (or recover manually with "
                         "`hermes sessions recover --source {db_path} --inspect-only` first).")
 
@@ -793,11 +793,11 @@ class HealthCheckUnavailable(str):
     must neither report the store healthy nor route it to repair."""
 
 
-def _retired_cjk_snapshot_health(db_path: Path, conn: sqlite3.Connection) -> Optional[str]:
-    """``_db_opens_cleanly`` for a store that still holds the retired CJK index, judged on a disposable copy
-    with the index retired. A copy that cannot be made or does not fit the temporary volume yields
+def _unavailable_cjk_snapshot_health(db_path: Path, conn: sqlite3.Connection) -> Optional[str]:
+    """``_db_opens_cleanly`` for a store whose CJK tokenizer is unavailable, judged on a disposable copy
+    with only the copy's CJK index detached. A copy that cannot be made or does not fit the temporary volume yields
     ``HealthCheckUnavailable``; a source SQLite cannot read is still reported as damage."""
-    from hermes_state_fts import drop_retired_cjk_index
+    from hermes_state_fts import drop_unavailable_cjk_probe_index
 
     try:
         with tempfile.TemporaryDirectory(prefix="hermes-cjk-probe-") as tmp:
@@ -813,9 +813,9 @@ def _retired_cjk_snapshot_health(db_path: Path, conn: sqlite3.Connection) -> Opt
                 return HealthCheckUnavailable(f"could not make the probe copy ({exc})")
             with contextlib.closing(probe):
                 try:
-                    drop_retired_cjk_index(probe.cursor())
+                    drop_unavailable_cjk_probe_index(probe.cursor())
                 except sqlite3.Error as exc:
-                    # Retiring is what the next open runs, so a failure is the store's state (a damaged base
+                    # A detach failure is the store's state (a damaged base
                     # FTS index trips the rename's trigger validation) unless the temporary file itself failed.
                     if _is_temporary_file_failure(exc):
                         return HealthCheckUnavailable(f"the probe copy failed ({exc})")
@@ -843,8 +843,7 @@ def _db_opens_cleanly(db_path: Path) -> Optional[str]:
 
     See #50502.
     """
-    from hermes_state import SessionDB
-    from hermes_state_fts import drop_retired_cjk_index, retired_cjk_index_present
+    from hermes_state import SessionDB, load_fts5_cjk_extension
     # ── Strategy 0.5: rebuild stale B-tree indexes (#63386) ── PRAGMA integrity_check can report "wrong #
     # of entries in index" when a B-tree index (e.g. idx_sessions_handoff_state) falls out of sync with its
     # base table. REINDEX rewrites the index b-tree from the canonical table rows using the existing index
@@ -852,10 +851,15 @@ def _db_opens_cleanly(db_path: Path) -> Optional[str]:
     conn = _connect_repair_durable(db_path)
     try:
         with contextlib.closing(conn):
+            # Best-effort tokenizer load: messages_fts_cjk needs cjk_unicode61 before any statement can touch it;
+            # tokenizer absence must never classify as corruption.
+            cjk_loaded = load_fts5_cjk_extension(conn)
             conn.execute("PRAGMA journal_mode").fetchone()
-            # Retirement must not hold the live write lock across a full integrity scan.
-            if retired_cjk_index_present(conn.cursor()):
-                return _retired_cjk_snapshot_health(db_path, conn)
+            # Without the tokenizer, probe the remaining indexes on a copy. Never retire the live index
+            # or let its unavailable triggers hide damage to the base FTS index.
+            from hermes_state_fts import cjk_index_present
+            if not cjk_loaded and cjk_index_present(conn.cursor()):
+                return _unavailable_cjk_snapshot_health(db_path, conn)
             rows = conn.execute("PRAGMA integrity_check").fetchall()
             problems = [str(r[0]) for r in rows if r and str(r[0]).lower() != "ok"]
             if problems:
@@ -900,8 +904,10 @@ def _db_opens_cleanly(db_path: Path) -> Optional[str]:
             except sqlite3.DatabaseError as exc:
                 # IntegrityError is a DatabaseError sibling of OperationalError, not a child: catching only the
                 # latter let the trigram-segment collision report "healthy".
-                # Missing messages/sessions tables = brand new file mid-init, not corruption.
-                if _schema_not_built(exc):
+                # Missing messages/sessions tables = brand new file mid-init, not corruption. "no such tokenizer":
+                # this process lacks the cjk extension the DB's index needs — capability gap; a tokenizer-less
+                # SessionDB drops the triggers itself.
+                if _schema_not_built(exc) or "no such tokenizer: cjk_unicode61" in str(exc).lower():
                     return None
                 return _ProbeFailure(f"fts5 write probe failed: {exc}", exc)
             finally:
@@ -1165,8 +1171,11 @@ def _edit_sqlite_master(conn: sqlite3.Connection, edit) -> None:
 def _strategy_rebuild_fts(conn: sqlite3.Connection) -> None:
     """FTS5 'rebuild' rewrites each index from the content table: the least-
     destructive fix for an index that rejects writes while reads work."""
+    from hermes_state import load_fts5_cjk_extension
+    # The cjk index can only be rebuilt with its tokenizer loaded (best-effort).
+    load_fts5_cjk_extension(conn)
     for table_name in _FTS_TABLES:
-        with contextlib.suppress(sqlite3.OperationalError):  # table absent (FTS disabled / trigram off)
+        with contextlib.suppress(sqlite3.OperationalError):  # table absent (FTS disabled / trigram off / cjk absent)
             conn.execute(f"INSERT INTO {table_name}({table_name}) VALUES('rebuild')")
 
 

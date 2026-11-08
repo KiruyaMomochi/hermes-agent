@@ -1012,7 +1012,7 @@ def _cmd_clean_markers(db, args):
         print(f"✓ Cleared {report['rows_affected']} row(s).")
 
 
-_BACKFILL_LABELS = {"backfill": "Rebuilding index"}
+_BACKFILL_LABELS = {"backfill": "Rebuilding index", "backfill_cjk": "Building CJK index"}
 _COUNTED_PHASES = frozenset({*_BACKFILL_LABELS, "teardown"})
 
 
