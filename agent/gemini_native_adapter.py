@@ -180,12 +180,33 @@ def normalize_gemini_base_url(base_url: Optional[str]) -> str:
     return f"{trimmed}/v1beta"
 
 
+GEMINI_NATIVE_PROVIDER_NAMES = frozenset({"gemini", "google", "google-gemini", "google-ai-studio"})
+
+
 def is_native_gemini_base_url(base_url: str) -> bool:
     """True when the endpoint speaks Gemini's native REST API (not ``/openai``)."""
     normalized = str(base_url or "").strip().rstrip("/").lower()
     if normalized.endswith("/openai"):
         return False
     return "generativelanguage.googleapis.com" in normalized or is_vertex_express_base_url(normalized)
+
+
+def is_native_gemini_route(base_url: Any = None, provider: Any = None) -> bool:
+    """True when the route speaks Gemini's native REST API.
+
+    An explicit ``/openai`` subpath or Vertex OAuth ``/endpoints/openapi`` URL opts into the
+    OpenAI-compatible wire even under the ``gemini`` provider; otherwise any ``gemini``-family
+    provider (including custom/proxy ``base_url`` such as Bifrost ``/genai/v1beta`` or 4router
+    ``/v1beta``) uses the native client, as does any URL recognized by ``is_native_gemini_base_url``.
+    """
+    normalized_url = str(base_url or "").strip().rstrip("/").lower()
+    if normalized_url.endswith("/openai") or (
+        "aiplatform.googleapis.com" in normalized_url and "/endpoints/" in normalized_url
+    ):
+        return False
+    if str(provider or "").strip().lower() in GEMINI_NATIVE_PROVIDER_NAMES:
+        return True
+    return is_native_gemini_base_url(normalized_url)
 
 
 def gemini_accepts_parameters_json_schema(base_url: str) -> bool:

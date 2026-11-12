@@ -1931,10 +1931,10 @@ def _ensure_route_client_headers(client_kwargs: dict, provider: str) -> None:
 
 
 def _gemini_native_client(agent, client_kwargs: dict, httpx_verify, *, reason: str, shared: bool):
-    """Native Gemini client when the base_url is the Gemini API, else None."""
-    from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
+    """Native Gemini client unless the base_url explicitly selects an OpenAI-compatible surface."""
+    from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_route
     base_url = str(client_kwargs.get("base_url", "") or "")
-    if not is_native_gemini_base_url(base_url):
+    if not is_native_gemini_route(base_url, getattr(agent, "provider", None)):
         return None
     safe_kwargs = {
         k: v for k, v in client_kwargs.items()

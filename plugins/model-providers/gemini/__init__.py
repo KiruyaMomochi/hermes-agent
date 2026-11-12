@@ -50,19 +50,19 @@ class GeminiProfile(ProviderProfile):
             thinking_config = _snake_case_gemini_thinking_config(raw)
             return {"extra_body": {"google": {"thinking_config": thinking_config}}} if thinking_config else {}
         from agent.gemini_long_decode import long_decode_max_output_tokens
-        from agent.gemini_native_adapter import is_native_gemini_base_url
-
-        # Long decode exists only on native generateContent (not /openai, not proxies).
+        # Native generateContent on any non-/openai surface (including proxies); /openai stays OpenAI-compat.
         budget = long_decode_max_output_tokens(context.get("model") or "", context.get("reasoning_config"))
-        return {"thinking_config": raw, **({"max_output_tokens": budget} if budget and is_native_gemini_base_url(base_url) else {})}
+        native = not str(base_url or "").strip().rstrip("/").lower().endswith("/openai")
+        return {"thinking_config": raw, **({"max_output_tokens": budget} if budget and native else {})}
 
     def create_client(self, **client_kwargs: Any) -> Any:
-        """The plugin's client (Interactions or generateContent per model) on a native Gemini base; None on
-        the OpenAI-compatible ``/openai`` surface and proxies, which keep the standard OpenAI client."""
-        from agent.gemini_native_adapter import is_native_gemini_base_url
-
+        """The plugin's client (Interactions on AI Studio, generateContent on proxies/Vertex) unless
+        the endpoint explicitly selects the OpenAI-compatible ``/openai`` surface."""
         base_url = str(client_kwargs.get("base_url") or self.base_url or "")
-        if not is_native_gemini_base_url(base_url):
+        normalized_url = base_url.strip().rstrip("/").lower()
+        if normalized_url.endswith("/openai") or (
+            "aiplatform.googleapis.com" in normalized_url and "/endpoints/" in normalized_url
+        ):
             return None
         from .client import GeminiClient
 

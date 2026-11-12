@@ -2209,8 +2209,8 @@ def _resolve_api_key_provider() -> tuple[Optional[OpenAI], Optional[str]]:
         # Native Gemini, else OpenAI-wire + Anthropic rewrap.
         base_url = _to_openai_base_url(raw_base_url)
         if provider_id == "gemini":
-            from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
-            if is_native_gemini_base_url(base_url):
+            from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_route
+            if is_native_gemini_route(base_url, provider_id):
                 return _tag_backend(GeminiNativeClient(api_key=api_key, base_url=base_url), provider_id), model
         if base_url_host_matches(base_url, "api.kimi.com"):
             headers = {"User-Agent": "claude-code/0.1.0"}
@@ -5151,8 +5151,8 @@ def _resolve_api_key_branch(req: _ResolveRequest, pconfig: Any, resolve_creds: C
         logger.debug("resolve_provider_client: %s native client from provider profile (%s)", provider, final_model)
         return _route_client(req, profile_client, final_model)
     if provider == "gemini":
-        from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
-        if is_native_gemini_base_url(base_url):
+        from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_route
+        if is_native_gemini_route(base_url, provider):
             client = GeminiNativeClient(api_key=api_key, base_url=base_url)
             logger.debug("resolve_provider_client: %s (%s)", provider, final_model)
             return _route_client(req, client, final_model)

@@ -532,12 +532,14 @@ def test_default_api_per_model_on_the_wire(gemini, config, settings, model, path
 def test_profile_supplies_the_client_only_on_the_native_surface(gemini):
     client_mod, _ = gemini
     profile = providers.get_provider_profile("gemini")
-    native = profile.create_client(api_key="k", base_url="https://generativelanguage.googleapis.com/v1beta")
-    try:
-        assert isinstance(native, client_mod.GeminiClient)
-    finally:
-        native.close()
+    for url in ("https://generativelanguage.googleapis.com/v1beta", "https://ai.example.test/genai/v1beta"):
+        native = profile.create_client(api_key="k", base_url=url)
+        try:
+            assert isinstance(native, client_mod.GeminiClient)
+        finally:
+            native.close()
     assert profile.create_client(api_key="k", base_url="https://generativelanguage.googleapis.com/v1beta/openai") is None
+    assert profile.create_client(api_key="k", base_url="https://ai.example.test/v1beta/openai") is None
 
 
 # Error bodies captured from the live Interactions endpoint (free-tier key).

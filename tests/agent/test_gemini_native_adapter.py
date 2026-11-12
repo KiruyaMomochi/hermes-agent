@@ -813,11 +813,16 @@ def test_native_client_never_reroutes_aq_keys_off_the_configured_surface(api_key
 def test_native_gemini_detection_covers_express_but_not_vertex_oauth_openapi():
     """The express base is native Gemini; the OAuth Vertex provider's OpenAI-compatible
     ``…/endpoints/openapi`` base must NOT be captured by the native adapter."""
-    from agent.gemini_native_adapter import is_native_gemini_base_url
+    from agent.gemini_native_adapter import is_native_gemini_base_url, is_native_gemini_route
 
     assert is_native_gemini_base_url("https://aiplatform.googleapis.com/v1beta1/publishers/google")
     assert not is_native_gemini_base_url(
         "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"
+    )
+    assert is_native_gemini_route("https://ai.example.test/genai/v1beta", "gemini")
+    assert not is_native_gemini_route("https://ai.example.test/v1beta/openai", "gemini")
+    assert not is_native_gemini_route(
+        "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi", "gemini"
     )
 
 

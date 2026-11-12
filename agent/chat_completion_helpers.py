@@ -37,7 +37,7 @@ from agent.chat_completion_stream_monitor import StreamingWaitMonitor, StreamLif
 from agent.transports.chat_completions import is_router_timeout_shim, router_timeout_shim_may_follow
 from agent.fast_mode import effective_request_overrides
 from agent.turn_context import substitute_api_content
-from agent.gemini_native_adapter import is_native_gemini_base_url
+from agent.gemini_native_adapter import is_native_gemini_route
 # Remote endpoints must never be fingerprinted: the probe waterfall is only valid for local/LM-Studio/Ollama
 # boxes. Non-Ollama remotes (sglang, vLLM, OpenAI-compat) expose Ollama-compat endpoints that can
 # misidentify and, without an api_key, return 401 on every leg (issue #89863).
@@ -2926,7 +2926,10 @@ class _StreamingCall(StreamingWaitMonitor):
     def _open_chat_stream(self, stream_kwargs: dict[str, Any]):
         # Native Gemini rejects OpenAI's usage-streaming extension; so do strict endpoints that
         # already 4xx'd on it on this route (``_stream_options_unsupported``, #9705; see route_verdicts).
-        if not is_native_gemini_base_url(self.agent.base_url) and not getattr(self.agent, "_stream_options_unsupported", False):
+        if (
+            not is_native_gemini_route(self.agent.base_url, getattr(self.agent, "provider", None))
+            and not getattr(self.agent, "_stream_options_unsupported", False)
+        ):
             stream_kwargs["stream_options"] = {"include_usage": True}
         request_client = self._attempt_request_client = self.clients.set_client(
             self.agent._create_request_openai_client(reason="chat_completion_stream_request", api_kwargs=stream_kwargs))
