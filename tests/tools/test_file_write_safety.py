@@ -641,7 +641,7 @@ class TestProtectedInstructionFiles:
     def _gate_on(self, monkeypatch):
         import tools.file_tools_write_guards as ft
         monkeypatch.setattr(
-            ft, "_protected_instruction_config", lambda: (True, [])
+            ft, "_protected_instruction_config", lambda: (True, [], [])
         )
         yield
 
@@ -735,7 +735,7 @@ class TestProtectedInstructionFiles:
     def test_config_disabled_skips_gate(self, tmp_path, approvals, monkeypatch):
         import tools.file_tools_write_guards as ft
         monkeypatch.setattr(
-            ft, "_protected_instruction_config", lambda: (False, [])
+            ft, "_protected_instruction_config", lambda: (False, [], [])
         )
         res = self._write(tmp_path / "AGENTS.md", "ok")
         assert not res.get("error"), res
@@ -744,7 +744,7 @@ class TestProtectedInstructionFiles:
     def test_extra_patterns_from_config(self, tmp_path, approvals, monkeypatch):
         import tools.file_tools_write_guards as ft
         monkeypatch.setattr(
-            ft, "_protected_instruction_config", lambda: (True, ["*.mdc"])
+            ft, "_protected_instruction_config", lambda: (True, ["*.mdc"], [])
         )
         approvals["answer"] = "deny"
         res = self._write(tmp_path / "rules.mdc")
@@ -848,7 +848,7 @@ class TestProtectedInstructionFiles:
             ft, "_get_real_hermes_home", lambda: str(fake_home.resolve())
         )
         monkeypatch.setattr(
-            ft, "_protected_instruction_config", lambda: (True, ["*.py"])
+            ft, "_protected_instruction_config", lambda: (True, ["*.py"], [])
         )
         approvals["answer"] = "deny"
         for target in (fake_home / "SOUL.md", fake_home / "AGENTS.md",
@@ -993,7 +993,7 @@ class TestProfileHomeExemptsHermesRoot:
     def _gate_on(self, monkeypatch):
         import tools.file_tools_write_guards as ft
         monkeypatch.setattr(
-            ft, "_protected_instruction_config", lambda: (True, [])
+            ft, "_protected_instruction_config", lambda: (True, [], [])
         )
         yield
 
