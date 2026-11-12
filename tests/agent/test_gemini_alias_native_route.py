@@ -13,7 +13,8 @@ def test_gemini_aliases_preserve_native_endpoint_selection():
     for provider in (profile.name, *profile.aliases):
         for base_url, expected in (
             ("https://generativelanguage.googleapis.com/v1beta", GeminiNativeClient),
-            ("https://example.invalid/v1", OpenAI),
+            ("https://example.invalid/genai/v1beta", GeminiNativeClient),
+            ("https://example.invalid/v1beta/openai", OpenAI),
         ):
             agent = SimpleNamespace(
                 provider=provider, model="gemini-flash-latest",
