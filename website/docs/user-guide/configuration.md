@@ -3089,6 +3089,35 @@ security:
 
 Earlier releases also had `tirith_*` keys for a bundled command scanner; it was removed and upgrading drops those keys. Content-level command checks are described in [Content-Level Command Checks](security.md#content-level-command-checks).
 
+### Agent-instruction file approval
+
+Writes to `AGENTS.md`, `CLAUDE.md`, `SOUL.md`, `.cursorrules` (case-insensitive),
+matching extra basenames, and project-local `.hermes` config files require human
+approval for each operation, even with auto-approve enabled.
+
+```yaml
+security:
+  protected_instruction_files: true
+  protected_instruction_extra_patterns: []  # Case-insensitive basename globs, e.g. "*.mdc"
+  protected_instruction_exempt_paths: []    # Explicit files or directories, e.g. "~/SOUL.md"
+```
+
+`security.protected_instruction_exempt_paths` accepts a list of absolute or
+`~`-prefixed paths. Files match exactly; an existing directory exempts all files
+beneath it recursively. Both configured entries and write targets are resolved
+with `realpath`: a symlink inside an exempt directory pointing outside it is
+**not** exempt, and similarly named sibling directories do not match. Configured
+symlinks refer to their resolved targets. Missing paths are treated as exact file
+paths, not directory prefixes. Relative paths and invalid entries are ignored;
+config read failures leave approval enabled with no exemptions.
+
+For example, `["~"]` exempts the entire agent user's home, **including project
+instruction files inside that home**. Prefer individual files or narrower
+directories unless that whole tree is trusted. This setting only skips the
+agent-instruction approval gate; credential deny rules, the Hermes `config.yaml`
+hard-block, and other write guards still apply. Host path exemptions do not apply
+to hosted sandbox paths.
+
 ## Website Blocklist
 
 Block specific domains from being accessed by the agent's web and browser tools:

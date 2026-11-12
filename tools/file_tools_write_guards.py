@@ -202,27 +202,51 @@ _PROTECTED_INSTRUCTION_BASENAMES = frozenset({
     "agents.md", "claude.md", "soul.md", ".cursorrules"})
 
 
-def _protected_instruction_config() -> tuple[bool, list[str]]:
-    """Return ``(enabled, extra_patterns)`` from ``security.protected_instruction_files`` /
-    ``security.protected_instruction_extra_patterns`` (fnmatch on basename). Config read
-    failures keep the gate ON — fail-safe for a security boundary."""
+def _protected_instruction_config() -> tuple[bool, list[str], list[str]]:
+    """Return enabled, basename patterns and explicit exempt file/directory paths.
+
+    Config read failures keep the gate ON with no exemptions — fail-safe for a
+    security boundary.
+    """
     try:
         from hermes_cli.config import load_config, cfg_get
         cfg = load_config()
         enabled = cfg_get(cfg, "security", "protected_instruction_files", default=True)
         extra = cfg_get(cfg, "security", "protected_instruction_extra_patterns", default=[])
+        exempt = cfg_get(cfg, "security", "protected_instruction_exempt_paths", default=[])
     except Exception:
-        return True, []
+        return True, [], []
     if not isinstance(enabled, bool):
         enabled = True
     if not isinstance(extra, list):
         extra = []
-    return enabled, [str(p) for p in extra if p]
+    if not isinstance(exempt, list):
+        exempt = []
+    return enabled, [str(p) for p in extra if p], [p for p in exempt if isinstance(p, str) and p]
+
+
+def _instruction_path_is_exempt(resolved: str, exempt_paths: list[str]) -> bool:
+    """Match only the write's resolved target, never its symlink's lexical name."""
+    for path in exempt_paths:
+        try:
+            expanded = os.path.expanduser(path)
+            # Relative config entries must not change meaning with the process cwd.
+            if not os.path.isabs(expanded):
+                continue
+            real = os.path.realpath(expanded)
+            if resolved == real or (
+                os.path.isdir(real) and resolved.startswith(real.rstrip(os.sep) + os.sep)
+            ):
+                return True
+        except (OSError, ValueError, RuntimeError):
+            continue
+    return False
 
 
 def _protected_instruction_reason(filepath: str, task_id: str = "default",
                                   *, enabled: bool | None = None,
-                                  extra_patterns: list[str] | None = None) -> str | None:
+                                  extra_patterns: list[str] | None = None,
+                                  exempt_paths: list[str] | None = None) -> str | None:
     """Return a short label when ``filepath`` targets a protected instruction file, else ``None``.
     Matches BOTH the normalized input and its realpath so no symlink direction escapes.
 
@@ -230,8 +254,11 @@ def _protected_instruction_reason(filepath: str, task_id: str = "default",
     protected file (#41351) nor a protected name that is itself a symlink escapes the gate. ``..`` traversal
     is neutralized by normpath/realpath before the basename compare.
     """
-    if enabled is None or extra_patterns is None:
-        enabled, extra_patterns = _protected_instruction_config()
+    if enabled is None or extra_patterns is None or exempt_paths is None:
+        configured_enabled, configured_extra, configured_exempt = _protected_instruction_config()
+        enabled = configured_enabled if enabled is None else enabled
+        extra_patterns = configured_extra if extra_patterns is None else extra_patterns
+        exempt_paths = configured_exempt if exempt_paths is None else exempt_paths
     if not enabled:
         return None
 
@@ -258,6 +285,10 @@ def _protected_instruction_reason(filepath: str, task_id: str = "default",
     for real_home in _hermes_exempt_homes():
         if resolved == real_home or resolved.startswith(real_home + os.sep):
             return None
+
+    # Host-configured exemptions must never authorize same-spelled sandbox paths.
+    if not hosted and _instruction_path_is_exempt(resolved, exempt_paths):
+        return None
 
     for candidate in (normalized, resolved):
         base = os.path.basename(candidate)
@@ -364,10 +395,11 @@ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "
 def _check_protected_instruction_write(paths: list[str], task_id: str = "default") -> str | None:
     """Gate a write/patch touching protected instruction files. ONE protected file gates
     the ENTIRE multi-file patch (one prompt, all-or-nothing)."""
-    enabled, extra = _protected_instruction_config()
+    enabled, extra, exempt = _protected_instruction_config()
     if not enabled:
         return None
-    reasons = [r for r in (_protected_instruction_reason(p, task_id, enabled=enabled, extra_patterns=extra)
+    reasons = [r for r in (_protected_instruction_reason(
+        p, task_id, enabled=enabled, extra_patterns=extra, exempt_paths=exempt)
                            for p in paths) if r]
     if not reasons:
         return None

@@ -626,7 +626,7 @@ class TestProtectedInstructionFiles:
     def _gate_on(self, monkeypatch):
         import tools.file_tools_write_guards as ft
         monkeypatch.setattr(
-            ft, "_protected_instruction_config", lambda: (True, [])
+            ft, "_protected_instruction_config", lambda: (True, [], [])
         )
         yield
 
@@ -720,7 +720,7 @@ class TestProtectedInstructionFiles:
     def test_config_disabled_skips_gate(self, tmp_path, approvals, monkeypatch):
         import tools.file_tools_write_guards as ft
         monkeypatch.setattr(
-            ft, "_protected_instruction_config", lambda: (False, [])
+            ft, "_protected_instruction_config", lambda: (False, [], [])
         )
         res = self._write(tmp_path / "AGENTS.md", "ok")
         assert not res.get("error"), res
@@ -729,7 +729,7 @@ class TestProtectedInstructionFiles:
     def test_extra_patterns_from_config(self, tmp_path, approvals, monkeypatch):
         import tools.file_tools_write_guards as ft
         monkeypatch.setattr(
-            ft, "_protected_instruction_config", lambda: (True, ["*.mdc"])
+            ft, "_protected_instruction_config", lambda: (True, ["*.mdc"], [])
         )
         approvals["answer"] = "deny"
         res = self._write(tmp_path / "rules.mdc")
@@ -932,7 +932,7 @@ class TestProfileHomeExemptsHermesRoot:
     def _gate_on(self, monkeypatch):
         import tools.file_tools_write_guards as ft
         monkeypatch.setattr(
-            ft, "_protected_instruction_config", lambda: (True, [])
+            ft, "_protected_instruction_config", lambda: (True, [], [])
         )
         # The resolved-home slot is filled once per process; keep the fixture honest.
         monkeypatch.setattr(ft, "_real_hermes_home_loaded", False)
