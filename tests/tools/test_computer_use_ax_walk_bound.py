@@ -14,16 +14,18 @@ import pytest
 
 from tools.computer_use import cua_backend
 from tools.computer_use.cua_backend_capture import _CaptureMixin
+from tools.computer_use.cua_backend_session import _CuaDriverSession
 
 
 class _StubCapture(_CaptureMixin):
-    """Capture-lane shell: enough state for ``_gws_args``, no driver, no session."""
+    """Capture-lane shell with an undiscovered session, without starting a driver."""
 
     def __init__(self) -> None:
         self._active_pid: Optional[int] = 607
         self._active_window_id: Optional[int] = 382
         self._session_id: Optional[str] = None
         self._last_app = ""
+        self._session = _CuaDriverSession(None)
 
     def _resolve_capture_windows(self, mode: str, app: Optional[str], pid: Optional[int],
                                  window_id: Optional[int]) -> list[dict[str, Any]]:
@@ -49,7 +51,7 @@ class TestAxWalkBound:
         stub = _StubCapture()
         assert stub._gws_args()["max_elements"] == 350
         # ... and capture() forwards the bound it actually sent onto the CaptureResult
-        monkeypatch.setattr(stub, "_capture_window_state", lambda: (None, None, [], ""))
+        monkeypatch.setattr(stub, "_capture_window_state", lambda mode: (None, None, [], ""))
         assert stub.capture("ax").ax_max_elements == 350
 
     def test_zero_disables_the_bound(self, tmp_path, monkeypatch):
