@@ -27,7 +27,7 @@ _PNG_B64 = (
 
 class _FakeSession:
     """Records tool calls; serves get_config / set_config / get_desktop_state
-    and (for the desktop-shell path) list_windows / screenshot."""
+    and (for the desktop-shell path) list_windows / get_window_state."""
 
     def __init__(
         self,
@@ -73,7 +73,7 @@ class _FakeSession:
                 "structuredContent": {"windows": self._windows},
                 "isError": False,
             }
-        if name == "screenshot":
+        if name == "get_window_state":
             return {
                 "data": "",
                 "images": [_PNG_B64],

@@ -2330,7 +2330,7 @@ class TestBoundsSpaceNote:
                            bounds=(3771, 0, 69, 60), app="")]
         note = _bounds_space_note(elems, 1455, 791)
         assert note is not None
-        assert "native desktop coordinates" in note
+        assert "does not establish a scale factor" in note
 
     def test_no_note_when_spaces_match(self):
         from tools.computer_use.backend import UIElement
@@ -2466,7 +2466,7 @@ class TestCaptureScreenshotPersistence:
 
 
 class TestBoundsScaleField:
-    def test_scale_reported_when_spaces_diverge(self, tmp_path, monkeypatch):
+    def test_bounds_extent_does_not_prove_scale(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         from tools.computer_use.backend import CaptureResult, UIElement
         from tools.computer_use.tool import _capture_response
@@ -2478,8 +2478,8 @@ class TestBoundsScaleField:
                             elements=elems, app="chrome.exe",
                             window_title="", png_bytes_len=0)
         out = json.loads(_capture_response(cap))
-        assert out["bounds_scale"] == pytest.approx(3799 / 1455, abs=0.01)
-        assert f"~{out['bounds_scale']}x" in out["summary"]
+        assert "bounds_scale" not in out
+        assert "does not establish a scale factor" in out["summary"]
 
     def test_no_scale_when_spaces_match(self):
         from tools.computer_use.backend import UIElement

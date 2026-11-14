@@ -258,19 +258,11 @@ class _CaptureMixin:
         return args
 
     def _capture_vision(self) -> tuple[Optional[str], Optional[str], list[UIElement], str]:
-        """Pixels only, ``elements`` always empty: ``(png_b64, mime, [], window_title)``. Drivers advertising the
-        cheaper standalone ``screenshot`` tool use it; current drivers folded PNG capture into ``get_window_state``
-        (tree DISCARDED here). Before discovery ran we still try ``screenshot`` first and fall back, so the path
-        self-heals on any driver version."""
-        png_b64, image_mime_type, window_title = None, None, ""
-        if self._session._has_tool("screenshot") or not self._session.capabilities_discovered:
-            png_b64, image_mime_type = _image_from_tool_result(self._call_capture_tool("screenshot", {
-                "window_id": self._active_window_id, "format": "jpeg", "quality": 85, "session": self._session_id}))
-        if not png_b64:
-            # "Unknown tool: screenshot" or an empty image part -> get_window_state. The title is cheap
-            # and useful; `elements` stays empty by contract.
-            gws_out = self._call_capture_tool("get_window_state", self._gws_args())
-            (png_b64, image_mime_type), (_, window_title) = _image_from_tool_result(gws_out), _tree_and_title(gws_out)
+        """Pixels only, with a session-owned snapshot for subsequent pixel input.
+        A standalone screenshot does not establish the driver's click context; discard the
+        get_window_state tree here while retaining its screenshot on the same connection."""
+        gws_out = self._call_capture_tool("get_window_state", self._gws_args())
+        (png_b64, image_mime_type), (_, window_title) = _image_from_tool_result(gws_out), _tree_and_title(gws_out)
         if not png_b64:
             cli_out = self._cli_refetch(
                 "get_window_state", self._gws_args(), 30.0, "vision screenshot",
@@ -305,7 +297,7 @@ class _CaptureMixin:
     def capture(self, mode: str = "som", app: Optional[str] = None, pid: Optional[int] = None,
                 window_id: Optional[int] = None) -> CaptureResult:
         """Capture the frontmost on-screen window or an exact known target: `list_windows` +
-        `get_window_state` (ax/som) or `screenshot` (vision). Only the structured
+        `get_window_state` for every window capture mode (vision discards the tree). Only the structured
         ``structuredContent.windows`` shape is supported."""
         # Schema-filler ids (models zero-fill optional properties) must not read as a targeting request.
         pid, window_id = [None if _is_placeholder_id(v) else v for v in (pid, window_id)]

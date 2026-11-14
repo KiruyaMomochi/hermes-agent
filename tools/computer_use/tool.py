@@ -612,25 +612,27 @@ def _format_elements(elements: list[UIElement], max_lines: int = 40) -> list[str
     return out + ([f"  ... +{len(elements) - max_lines} more (call capture with app= to narrow)"] if len(elements) > max_lines else [])
 
 def _bounds_hints(elements: list[UIElement], image_width: int, image_height: int) -> tuple[Optional[float], Optional[str]]:
-    """(scale, note) when element bounds live in a different coordinate space than the screenshot, else (None, None).
-    On HiDPI displays AX bounds are native while the screenshot is downscaled, so coordinate= clicks read off the
-    screenshot miss by the scale factor. 5% slack: window chrome can hang a few px past the captured frame without
-    implying a different space. Scale heuristic: larger axis ratio wins."""
+    """Warn about AX bounds outside the image without inferring a pixel-click scale.
+    Desktop offsets, window decorations and scrollable content can all exceed the screenshot;
+    even a top-level frame is not evidence of a scale transform."""
     if not elements or image_width <= 0 or image_height <= 0:
         return None, None
-    max_x = max_y = 0
+    outside = False
     for e in elements:
         try:
             x, y, w, h = e.bounds
         except (TypeError, ValueError):
             continue
-        max_x, max_y = max(max_x, int(x) + int(w)), max(max_y, int(y) + int(h))
-    if max_x <= image_width * 1.05 and max_y <= image_height * 1.05:
+        outside |= x < 0 or y < 0 or x + w > image_width * 1.05 or y + h > image_height * 1.05
+    if not outside:
         return None, None
-    note = (f"element bounds are in native desktop coordinates (extend to ~{max_x}x{max_y}), "
-            f"NOT screenshot pixels ({image_width}x{image_height}). coordinate= clicks expect the native "
-            "space — derive click points from element bounds, or scale screenshot positions up accordingly")
-    return round(max(max_x / image_width, max_y / image_height), 2), note
+    from tools.prompt_text import tool_text
+    note = tool_text("tool_results.computer_use.bounds_note", (
+        "element bounds may include desktop offsets or off-screen content, not screenshot pixels "
+        "({image_width}x{image_height}); this does not establish a scale factor. Prefer element indices "
+        "or use window screenshot pixels for coordinate= clicks; do not scale positions from AX extents"
+    )).format(image_width=image_width, image_height=image_height)
+    return None, note
 
 _bounds_scale = lambda elements, image_width, image_height: _bounds_hints(elements, image_width, image_height)[0]
 _bounds_space_note = lambda elements, image_width, image_height: _bounds_hints(elements, image_width, image_height)[1]
@@ -661,8 +663,7 @@ def _capture_summary_lines(v: SimpleNamespace) -> list[str]:
     """Human-readable capture summary; line ORDER is contract. Lists only what `elements` surfaces, otherwise the
     summary names indices the model can't find."""
     notes = (
-        v.bounds_note and v.bounds_note + (f"; estimated scale ~{v.bounds_scale}x (screenshot position x "
-                                           f"{v.bounds_scale} ≈ native coordinate)" if v.bounds_scale else ""),
+        v.bounds_note,
         v.screenshot_path and f"shareable screenshot saved to {v.screenshot_path}",
         v.cap.note,
         v.elements_file and (f"{'' if v.ax_capped else 'full '}element tree with untruncated labels "
