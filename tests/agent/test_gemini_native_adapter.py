@@ -28,6 +28,28 @@ class DummyResponse:
 
 
 
+@pytest.mark.parametrize("model", ["gemini-2.5-flash", "gemini-3.6-flash"])
+@pytest.mark.parametrize(
+    "format_, mime_type",
+    [("ogg", "audio/ogg"), ("opus", "audio/ogg"), ("mp3", "audio/mpeg"),
+     ("wav", "audio/wav"), ("m4a", "audio/m4a"), ("flac", "audio/flac"),
+     ("aac", "audio/aac"), ("webm", "audio/webm")],
+)
+def test_user_input_audio_reaches_native_request(model, format_, mime_type):
+    from agent.gemini_native_adapter import build_gemini_request
+
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "Describe the sound"},
+        {"type": "input_audio", "input_audio": {"data": "T2dnUw==", "format": format_}},
+    ]}]
+    request = build_gemini_request(messages=messages, model=model)
+    assert request["contents"] == [{"role": "user", "parts": [
+        {"text": "Describe the sound"},
+        {"inlineData": {"mimeType": mime_type, "data": "T2dnUw=="}},
+    ]}]
+    assert messages[0]["content"][1]["input_audio"]["format"] == format_
+
+
 def test_followup_user_turn_is_not_merged_into_function_response_turn():
     """Human follow-up after tool results must stay its own user content.
 
@@ -704,6 +726,43 @@ def test_gemini_2x_does_not_embed_image_parts():
     )
     fr = request["contents"][1]["parts"][0]["functionResponse"]
     assert "parts" not in fr
+
+
+@pytest.mark.parametrize("model", ["gemini-2.5-flash", "gemini-3.6-flash"])
+@pytest.mark.parametrize("tool_role", ["tool", "function"])
+def test_audio_tool_result_stays_alongside_function_response(model, tool_role):
+    from agent.gemini_native_adapter import build_gemini_request
+
+    messages = _vision_tool_messages()
+    messages[0]["tool_calls"][0]["function"]["name"] = "audio_listen"
+    messages[0]["tool_calls"].append({
+        "id": "call_2", "type": "function", "function": {"name": "read_file", "arguments": "{}"},
+    })
+    messages[1]["role"] = tool_role
+    messages[1]["name"] = "audio_listen"
+    messages[1]["content"].append({
+        "type": "input_audio", "input_audio": {"data": "T2dnUw==", "format": "opus"},
+    })
+    messages.extend([
+        {"role": "tool", "tool_call_id": "call_2", "content": "other result"},
+        {"role": "user", "content": "Continue"},
+    ])
+    before = json.dumps(messages)
+    contents = build_gemini_request(messages=messages, model=model)["contents"]
+    assert [c["role"] for c in contents] == ["model", "user", "model", "user"]
+    parts = contents[1]["parts"]
+    assert parts[1] == {"inlineData": {"mimeType": "audio/ogg", "data": "T2dnUw=="}}
+    responses = [p["functionResponse"] for p in parts if "functionResponse" in p]
+    assert [r["name"] for r in responses] == ["audio_listen", "read_file"]
+    assert responses[0]["response"] == {"output": "a red pixel"}
+    assert responses[1]["response"] == {"output": "other result"}
+    if model.startswith("gemini-3"):
+        assert [r["id"] for r in responses] == ["call_1", "call_2"]
+        assert [p["inlineData"]["mimeType"] for p in responses[0]["parts"]] == ["image/png"]
+    else:
+        assert all("parts" not in r and "id" not in r for r in responses)
+    assert contents[-1]["parts"] == [{"text": "Continue"}]
+    assert json.dumps(messages) == before
 
 
 def test_text_only_tool_result_has_no_parts():

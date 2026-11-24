@@ -1,0 +1,21 @@
+{
+  "description": "Listen to a local audio file and answer questions about speech, music, sounds, or tone. When native audio is unavailable, returns speech transcription only.",
+  "name": "audio_listen",
+  "parameters": {
+    "properties": {
+      "audio_path": {
+        "description": "Local audio file path (ogg, opus, mp3, wav, m4a, flac, aac, webm); maximum 20 MiB.",
+        "type": "string"
+      },
+      "question": {
+        "default": "",
+        "description": "Optional question or listening instructions about the audio.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "audio_path"
+    ],
+    "type": "object"
+  }
+}

@@ -5,8 +5,9 @@
       "stable": 1829,
       "volatile": 1268
     },
-    "tool_tokens": 9464,
+    "tool_tokens": 9603,
     "tools": [
+      "audio_listen",
       "browser_cdp",
       "browser_dialog",
       "browser_exec",
@@ -36,8 +37,9 @@
       "stable": 1225,
       "volatile": 1268
     },
-    "tool_tokens": 9464,
+    "tool_tokens": 9603,
     "tools": [
+      "audio_listen",
       "browser_cdp",
       "browser_dialog",
       "browser_exec",
@@ -67,8 +69,9 @@
       "stable": 1646,
       "volatile": 1266
     },
-    "tool_tokens": 9464,
+    "tool_tokens": 9603,
     "tools": [
+      "audio_listen",
       "browser_cdp",
       "browser_dialog",
       "browser_exec",
@@ -98,8 +101,9 @@
       "stable": 2420,
       "volatile": 1264
     },
-    "tool_tokens": 9620,
+    "tool_tokens": 9759,
     "tools": [
+      "audio_listen",
       "browser_cdp",
       "browser_dialog",
       "browser_exec",
@@ -129,8 +133,9 @@
       "stable": 1225,
       "volatile": 1268
     },
-    "tool_tokens": 9464,
+    "tool_tokens": 9603,
     "tools": [
+      "audio_listen",
       "browser_cdp",
       "browser_dialog",
       "browser_exec",
@@ -160,8 +165,9 @@
       "stable": 1211,
       "volatile": 1268
     },
-    "tool_tokens": 9464,
+    "tool_tokens": 9603,
     "tools": [
+      "audio_listen",
       "browser_cdp",
       "browser_dialog",
       "browser_exec",
@@ -191,8 +197,9 @@
       "stable": 1495,
       "volatile": 1269
     },
-    "tool_tokens": 10120,
+    "tool_tokens": 10259,
     "tools": [
+      "audio_listen",
       "browser_cdp",
       "browser_dialog",
       "browser_exec",
@@ -223,8 +230,9 @@
       "stable": 1244,
       "volatile": 1269
     },
-    "tool_tokens": 9464,
+    "tool_tokens": 9603,
     "tools": [
+      "audio_listen",
       "browser_cdp",
       "browser_dialog",
       "browser_exec",
@@ -254,8 +262,9 @@
       "stable": 1330,
       "volatile": 1269
     },
-    "tool_tokens": 9464,
+    "tool_tokens": 9603,
     "tools": [
+      "audio_listen",
       "browser_cdp",
       "browser_dialog",
       "browser_exec",

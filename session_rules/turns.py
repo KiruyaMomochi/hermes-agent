@@ -999,15 +999,16 @@ def _is_ephemeral_scaffolding(msg: Any) -> bool:
 
 
 def _durable_content(content: Any) -> Any:
-    """Text-only DB projection: multimodal envelopes → summary; part lists keep text, images → ``[screenshot]``."""
+    """Text-only DB projection: envelopes → summary; images → ``[screenshot]``, audio → ``[audio]``."""
     if _is_multimodal_tool_result(content):
         return _multimodal_text_summary(content)
     if not isinstance(content, list):
         return content
     txt = [
-        str(p.get("text", "")) if p.get("type") == "text" else _image_marker(p)
+        str(p.get("text", "")) if p.get("type") == "text" else (
+            "[audio]" if p.get("type") in {"audio", "input_audio"} else _image_marker(p))
         for p in content
-        if isinstance(p, dict) and (p.get("type") == "text" or p.get("type") in _IMAGE_PART_TYPES)
+        if isinstance(p, dict) and (p.get("type") in {"text", "audio", "input_audio"} or p.get("type") in _IMAGE_PART_TYPES)
     ]
     return "\n".join(txt) if txt else None
 

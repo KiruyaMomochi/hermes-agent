@@ -287,6 +287,9 @@ SESSION_CONTEXT_HEADER: str = (
 # Text sent in place of the caption when the user attaches images with no text.
 IMAGE_ONLY_CAPTION = "What do you see in this image?"
 
+# Audio-only turns use the same prompt_overrides.yaml constant mechanism.
+AUDIO_ONLY_CAPTION = "Listen to this audio."
+
 # Header/footer around the <available_skills> index. Module-level so prompt_overrides.yaml can replace them.
 # ``{basic_tools}`` is substituted at render time ("web_search or terminal", or "terminal" without web tools).
 SKILLS_INDEX_HEADER = (

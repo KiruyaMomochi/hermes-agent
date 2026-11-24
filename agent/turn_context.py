@@ -1562,6 +1562,10 @@ def build_api_messages(
     # images on this wire copy (vision.replay_recent_images; native image input only).
     from agent.image_replay import replay_for_agent
     replay_for_agent(agent, api_messages)
+    from agent.audio_replay import replay_for_agent as replay_audio_for_agent
+    from agent.tool_audio import prepare_tool_audio_for_api
+    replay_audio_for_agent(agent, api_messages)
+    prepare_tool_audio_for_api(agent, api_messages)
 
     # A provider-rejected Anthropic signature is suppressed outside canonical history and
     # survives fresh request construction / process resume via session model_config.

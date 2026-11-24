@@ -38,6 +38,7 @@ from gateway.session import (
 from gateway.session_context import scoped_turn_actor
 from gateway.session_transcript import TranscriptReadError
 from gateway.run_turn_bubble_cleanup import register_bubble_cleanup, settle_turn_senders
+from gateway.run_inbound_audio import native_audio_event
 from gateway.turn_context import TurnContext
 from gateway.turn_lease import DEFAULT_LEASE_WAIT, TurnLeaseTimeoutError
 from hermes_constants import get_hermes_home_override
@@ -1527,9 +1528,10 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
                     # FIFO already has this send.
                     pending = None if executing_admission.get() else interrupt_message
             elif pending_event:
-                # Transcribe audio BEFORE it becomes the next user turn (real transcript, not a path).
                 _pending_text = pending_event.text or ""
-                if self._pending_event_audio_paths(pending_event):
+                followup_key = self._session_key_for_source(pending_event.source) if pending_event.source else session_key
+                native_audio = await asyncio.to_thread(native_audio_event, self, pending_event, followup_key)
+                if self._pending_event_audio_paths(pending_event) and not native_audio:
                     pending, _ = await self._transcribe_and_echo_pending_voice(
                         pending_event, adapter, source, _pending_text, log_context="Voice-drain",
                         metadata={"thread_id": source.thread_id} if source.thread_id else None,
@@ -1692,9 +1694,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         next_source, next_message, next_session_key = source, pending, session_key
         # message_type is carried into the recursive call so queued voice turns can stream TTS.
         next_message_id = next_channel_prompt = next_message_type = None
-        # The raw inbound id keys the delivery-ledger obligation for the follow-up's own final send,
-        # distinct from the reply anchor above (None in forum topics). Carry it or two chained
-        # topic turns with the same text would collide on one obligation id (queued-final-ledger).
+        # Raw inbound ids, unlike topic reply anchors, distinguish chained final-send obligations.
         next_inbound_id = None
         # Queued Discord turns carry the same routing note as first turns; persist the authored text.
         next_persist_message = None

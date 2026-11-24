@@ -21,6 +21,7 @@ from agent.session_activity import format_iteration_progress
 from gateway.config import Platform
 from gateway.platforms.base import EphemeralReply
 from gateway.platforms.event import MessageEvent, MessageType
+from gateway.run_inbound_audio import native_audio_event
 from gateway.session import SessionSource
 from gateway.whatsapp_identity import canonical_whatsapp_identifier
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -738,6 +739,10 @@ class GatewayBusySessionMixin:
         plain_text = (
             event.message_type == MessageType.TEXT and not event.media_urls and not event.media_types
         )
+        if effective_mode == "steer":
+            if await asyncio.to_thread(native_audio_event, self, event, session_key):
+                # steer() is text-only: queue the retained bytes BEFORE any STT/echo is attempted.
+                effective_mode = "queue"
         if effective_mode == "steer":
             steer_text = await self._prepare_busy_steer_text(event)
             # Steerable: plain text, OR every attachment is voice media folded into steer_text.

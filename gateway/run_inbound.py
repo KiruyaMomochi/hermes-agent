@@ -26,6 +26,7 @@ from gateway.platforms.base import EphemeralReply
 from gateway.platforms.event import MessageEvent, MessageType, clean_attachment_filename
 from gateway.run_busy import approval_input_words
 from gateway.run_inbound_media import rehome_inbound_media
+from gateway.run_inbound_audio import consume_audio_paths, event_audio_paths, native_audio_event
 from gateway.run_inbound_hooks import GatewayInboundHooksMixin
 from gateway.run_inbound_moa import GatewayInboundMoaMixin
 from gateway.run_inbound_transcription import GatewayInboundTranscriptionMixin
@@ -1794,9 +1795,15 @@ class GatewayInboundMixin(
         session_key = session_key or self._session_key_for_source(source)
         # Reset only this session's per-call buffer; other sessions may be concurrently preparing.
         self._consume_pending_native_image_paths(session_key)
+        consume_audio_paths(self, session_key)
 
         message_text = self._prefix_inbound_sender_context(event, source, message_text)
         image_paths, audio_paths, audio_file_paths, video_paths = self._classify_inbound_media(event, _pending_stt_prepared)
+        if await asyncio.to_thread(native_audio_event, self, event, session_key):
+            self._session_state(session_key).persistent.native_audio_paths = event_audio_paths(event)
+            audio_paths, audio_file_paths = [], []
+            # A previous busy attempt's STT memo must not replace this native turn's caption.
+            message_text = self._prefix_inbound_sender_context(event, source, event.text or '')
         if image_paths:
             message_text = await self._enrich_inbound_images(source, session_key, message_text, image_paths)
         if audio_paths:

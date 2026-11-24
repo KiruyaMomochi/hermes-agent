@@ -12,7 +12,7 @@ _HERMES_CORE_TOOLS = [
     "web_search", "web_extract",
     "terminal", "process_manage",
     "read_file", "write_file", "patch", "search_files",
-    "vision_analyze", "image_generate",
+    "vision_analyze", "audio_listen", "image_generate",
     "skills_list", "skill_view", "skill_manage",
     "browser_exec",  # THE browser: Python over CDP (browser-harness)
     "browser_cdp", "browser_dialog",
@@ -79,7 +79,7 @@ TOOLSETS = {
         "X (Twitter) Search.",
         ["x_search"],
     ),
-    "vision": _ts("Image analysis and vision tools", ["vision_analyze"]),
+    "vision": _ts("Image and audio understanding tools", ["vision_analyze", "audio_listen"]),
     "video": _ts("Video analysis and understanding tools (opt-in, not in default toolset)", ["video_analyze"]),
     "image_gen": _ts("Creative generation tools (images)", ["image_generate"]),
     "video_gen": _ts(

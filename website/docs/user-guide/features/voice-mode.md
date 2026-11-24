@@ -38,6 +38,69 @@ A paid [Nous Portal](./tool-gateway.md) subscription supplies the LLM (step 2) *
 
 ## Requirements
 
+### Native audio input and local files
+
+Messaging voice notes and audio attachments can go directly to the **main model**,
+without a transcription sub-call or transcript echo bubble. Known audio-capable
+Gemini models (including Gemini 3.x/4.x proxy routes) and OpenAI audio models use
+this route automatically. Other models, including Claude, retain the existing
+voice-transcription behavior. Ordinary audio/document attachments keep their file
+notes on the transcription route; they are not automatically transcribed as voice.
+
+```yaml
+agent:
+  audio_input_mode: auto  # auto | native | stt
+audio:
+  replay_recent_audio: 3  # 0 disables replay from database-rebuilt history
+```
+
+`native` still requires a known audio-capable model, so switching to Claude falls
+back safely. `stt` forces the existing voice-transcription route, respecting
+`stt.enabled`. Native input does not require STT to be enabled. Spoken wake-word or
+group-mention gates and clarification replies may still need transcription because
+those features require text before the main-model turn.
+
+The `audio_listen(audio_path, question="")` tool loads a local audio file into the
+main model's context. It is included alongside image analysis in standard CLI and
+messaging toolsets. On a model without audio input it returns speech transcription
+only, not a music/sound analysis. Supported extensions are `.ogg`, `.opus`, `.mp3`,
+`.wav`, `.m4a`, `.flac`, `.aac`, and `.webm`; each file must be nonempty and at most
+20 MiB. Provider format restrictions still apply (standard OpenAI audio routes may
+require WAV or MP3). Unsupported containers use the STT fallback on OpenAI audio
+models; no automatic transcoding or secondary audio LLM is used. Files that fail
+native loading keep a fallback or an explicit error rather than silently disappearing.
+
+Inbound audio is retained in the profile's content-addressed
+`cache/documents/native-inputs/<sha256>/<name>` store using the normal admission
+lease and settled-media cleanup lifecycle. The session database keeps `[audio]`
+and `[Audio attached at: <path>]`, not base64 bytes. On database-rebuilt turns,
+retained, digest-verified clips are reattached on a wire copy only. Like image
+replay, the window advances in batches: a setting of 3 may replay 3–5 newest clips
+before the next batch expires, preserving the cached prefix. Missing, changed,
+cross-profile, or swept files are not replayed; unsupported models receive text
+markers instead. Already-live attachments remain in the conversation even when
+replay is disabled. Native `audio_listen` results retain their source bytes and
+replay through the same window, including after a database reload. Native audio
+voice turns stay on the main model even when `auxiliary.voice_chat` is configured.
+Context estimates reserve a rough 4096 tokens per clip instead of counting base64
+as text; actual provider usage may differ, especially for long recordings.
+
+Caption-less native turns use `AUDIO_ONLY_CAPTION` (default: `Listen to this audio.`).
+Customize it and tool wording in the profile's `prompt_overrides.yaml`, then start
+a new session for prompt/schema changes:
+
+```yaml
+AUDIO_ONLY_CAPTION: "Listen to the emotion as well as the words."
+tool_descriptions:
+  audio_listen:
+    description: "Listen to local speech, music, and sounds."
+    params:
+      question: "What should you listen for?"
+tool_results:
+  audio_listen:
+    native: "Audio is attached. Answer using your own audio understanding."
+```
+
 ### Python Packages
 
 Use `hermes tools` to configure voice providers. Missing built-in feature

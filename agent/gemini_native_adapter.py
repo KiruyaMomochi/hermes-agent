@@ -326,11 +326,30 @@ def _inline_data_part(item: dict[str, Any]) -> Optional[dict[str, Any]]:
         return None
 
 
+_AUDIO_MIME_TYPES = {
+    "ogg": "audio/ogg", "opus": "audio/ogg", "mp3": "audio/mpeg",
+    "wav": "audio/wav", "m4a": "audio/m4a", "flac": "audio/flac",
+    "aac": "audio/aac", "webm": "audio/webm",
+}
+
+
+def _input_audio_part(item: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """OpenAI input_audio carries base64 bytes, not a data URL."""
+    audio = item.get("input_audio")
+    if item.get("type") != "input_audio" or not isinstance(audio, dict):
+        return None
+    format_, data = audio.get("format"), audio.get("data")
+    mime_type = _AUDIO_MIME_TYPES.get(format_) if isinstance(format_, str) else None
+    if not mime_type or not isinstance(data, str) or not data:
+        return None
+    return {"inlineData": {"mimeType": mime_type, "data": data}}
+
+
 def _multimodal_part(item: Any) -> Optional[dict[str, Any]]:
     text = _text_of(item)
     if text or isinstance(item, str):
         return {"text": text}
-    return _inline_data_part(item) if isinstance(item, dict) else None
+    return (_input_audio_part(item) or _inline_data_part(item)) if isinstance(item, dict) else None
 
 
 def _extract_multimodal_parts(content: Any) -> list[dict[str, Any]]:
@@ -398,7 +417,8 @@ def _translate_tool_result_to_gemini(
     if include_ids and tool_call_id:
         function_response["id"] = tool_call_id
     # Gemini 3.x accepts images inside functionResponse.parts; 2.x rejects the field.
-    if image_parts := [p for p in _extract_multimodal_parts(raw_content) if "inlineData" in p] if is_gemini3 else []:
+    if image_parts := [p for p in _extract_multimodal_parts(raw_content)
+                       if p.get("inlineData", {}).get("mimeType", "").startswith("image/")] if is_gemini3 else []:
         function_response["parts"] = image_parts
     return {"functionResponse": function_response}
 
@@ -454,7 +474,12 @@ def _build_gemini_contents(
             continue
         if role in {"tool", "function"}:
             part = _translate_tool_result_to_gemini(msg, tool_name_by_call_id, include_tool_call_ids, is_gemini3=is_gemini3)
-            contents.append({"role": "user", "parts": [part]})
+            # Keep audio on the enclosing user turn: unlike image functionResponse.parts,
+            # this shape also works on Gemini 2.x. The current function-calling audio
+            # examples document Interactions, not this generateContent wire format.
+            audio_parts = [p for p in _extract_multimodal_parts(msg.get("content"))
+                           if p.get("inlineData", {}).get("mimeType", "").startswith("audio/")]
+            contents.append({"role": "user", "parts": [part, *audio_parts]})
             continue
         parts = _extract_multimodal_parts(msg.get("content"))
         tool_calls = msg.get("tool_calls") or []

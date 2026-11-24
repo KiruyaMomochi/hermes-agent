@@ -1882,6 +1882,17 @@ Each entry supports the same three knobs as any auxiliary task config:
 
 Separate from `auxiliary.vision` (which picks the describer model): when the *main* model is vision-capable, `vision_analyze` and browser screenshots embed real pixels into tool results that are re-sent every later turn. `vision.embed_target_bytes` (default `262144`, clamped 64 KiB..4 MiB) sizes one embed; `vision.max_calls_per_image` caps how often the same image may be embedded per session (unset = 3 inside delegated subagents, unlimited for the main agent; `0` = unlimited); `vision.replay_recent_images` (default `3`, `0` = off) re-sends the newest user images on turns rebuilt from the session database (API server, `--resume`). See [Vision → Native embeds ride the session](./features/vision.md#native-embeds-ride-the-session-visionembed_target_bytes-and-visionmax_calls_per_image).
 
+### Native audio input
+
+`agent.audio_input_mode` defaults to `auto`; `auto` and `native` send inbound
+voice/audio directly to known audio-capable main models, while unsupported models
+fall back to the existing voice STT path. `stt` forces that transcription path.
+`audio.replay_recent_audio` defaults to `3` (`0` = off), reattaching retained native
+clips on database-rebuilt turns in cache-preserving batches. The `audio_listen`
+tool explicitly loads local audio into the main model or returns STT text when
+native audio is unavailable. See [Voice Mode → Native audio input and local files](./features/voice-mode.md#native-audio-input-and-local-files)
+for formats, retention, prompt overrides, and model-switch behavior.
+
 ### Limiting auxiliary concurrency
 
 `max_concurrency` caps in-flight LLM calls for auxiliary tasks such as `compression` and `title_generation` across the whole process. `auxiliary.vision.max_concurrency` is excluded: it already controls only vision's CPU-bound image encode/resize workers, not LLM requests. This is most useful when:

@@ -2451,9 +2451,12 @@ def _msg_fingerprint(value: Any, pins: list) -> Any:
 
 def _estimate_message_tokens_cached(msg: Any, image_cost: int) -> int:
     """Text tokens + images x ``image_cost``; the memo holds text and image COUNT so a recalibrated
-    per-image price re-prices cached rows without invalidating them."""
+    per-image price re-prices cached rows without invalidating them. Unknown-duration audio
+    reserves 4096 tokens per clip: a rough allowance, not a byte-based or billing estimate."""
     def _compute() -> tuple[int, int]:
-        return _estimate_message_tokens_without_images(msg), _count_image_tokens(msg, 1)
+        # Unknown-duration audio gets a separate clip allowance, never a base64 text charge.
+        audio = sum(_count_parts(msg.get(key), {"input_audio"}) for key in ("content", "output")) if isinstance(msg, dict) else 0
+        return _estimate_message_tokens_without_images(msg) + audio * 4096, _count_image_tokens(msg, 1)
     replay = codex_reasoning_replay_tokens(msg)  # stamp lives in display_metadata, outside the memo key
     try:
         pins = MemoPins()
@@ -2497,7 +2500,8 @@ def _wire_message_shadow(msg: dict[str, Any]) -> dict[str, Any]:
     * ``api_content`` SUBSTITUTES ``content`` (mirrors ``turn_context.substitute_api_content`` exactly):
       only a non-empty STRING sidecar on a user/assistant row displaces content; substituting any
       other shape would UNDERcount — the dangerous direction.
-    * Base64 images become a placeholder; ``_count_image_tokens`` charges them flat.
+    * Encoded images/audio become placeholders (also in Responses tool ``output``);
+      images are charged flat and unknown-duration input audio gets a per-clip allowance.
     * ``reasoning`` never ships as-is (request builds pop it after optionally promoting it into
       ``reasoning_content``); counting both inflated estimates up to +53%.
     * Opaque provider blobs (``encrypted_content`` on codex reasoning / compaction items) are
@@ -2517,25 +2521,15 @@ def _wire_message_shadow(msg: dict[str, Any]) -> dict[str, Any]:
                 shadow["content"] = v
         elif k == "content" and sidecar_wins:
             continue
-        elif k == "content" and isinstance(v, list):
+        elif k in ("content", "output") and isinstance(v, list):
             shadow[k] = [
-                {"type": part.get("type"), "image": "[stripped]"}
-                if isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES
+                {"type": part.get("type"), "audio" if part.get("type") == "input_audio" else "image": "[stripped]"}
+                if isinstance(part, dict) and part.get("type") in (*_IMAGE_PART_TYPES, "input_audio")
                 else part
                 for part in v
             ]
         elif k == "content" and isinstance(v, dict) and v.get("_multimodal"):
             shadow[k] = v.get("text_summary", "")
-        elif k == "output" and isinstance(v, list):
-            # Responses ``function_call_output`` output parts: strip the image
-            # payload like the ``content`` branch above so encoded bytes are
-            # priced by the flat per-image model, never as text.
-            shadow[k] = [
-                {"type": part.get("type"), "image": "[stripped]"}
-                if isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES
-                else part
-                for part in v
-            ]
         elif k == "codex_reasoning_items":
             shadow[k] = strip_opaque_replay_items(v)
         elif k == "encrypted_content":  # a Responses reasoning/compaction item passed as a row

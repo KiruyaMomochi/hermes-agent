@@ -137,6 +137,14 @@ def begin_voice_turn_route(agent: Any, messages: list[dict[str, Any]], system_pr
     if not getattr(agent, "_voice_turn_pending", False):
         return system_prompt
     agent._voice_turn_pending = False
+    # Raw audio was admitted for the main model's capabilities. Auxiliary voice routes
+    # are for transcribed speech and may not accept audio (even when explicitly pinned).
+    current_user = next((msg for msg in reversed(messages) if msg.get("role") == "user"), {})
+    content = current_user.get("content")
+    if isinstance(content, list) and any(
+        isinstance(part, dict) and part.get("type") == "input_audio" for part in content
+    ):
+        return system_prompt
     from agent.auxiliary_task_config import _get_auxiliary_task_config
     from hermes_constants import parse_reasoning_effort
     cfg = _get_auxiliary_task_config(TASK)

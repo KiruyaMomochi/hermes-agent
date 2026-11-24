@@ -65,6 +65,48 @@ def test_voice_turn_routes_then_restores(tmp_path, monkeypatch, voice_window_ok)
         assert agent._fallback_activated is False
 
 
+def test_raw_audio_keeps_main_route_despite_auxiliary_voice_config(tmp_path, monkeypatch):
+    from agent.voice_turn_route import begin_voice_turn_route, end_voice_turn_route
+
+    with FakeLLMServer([Text("heard the clip")]) as main, FakeLLMServer([]) as voice:
+        home = write_hermes_home(tmp_path / ".hermes", main.base_url, extra_config=(
+            "auxiliary:\n  voice_chat:\n    provider: custom\n"
+            f"    base_url: {voice.base_url}\n    model: claude-sonnet-4-6\n"
+            "    reasoning_effort: none\n"
+        ))
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        agent = _agent(home, main.base_url)
+        agent.model = "gemini-2.5-pro"
+        agent.reasoning_config = {"enabled": True, "effort": "high"}
+        agent._voice_turn_pending = True
+        messages = [{"role": "user", "content": [
+            {"type": "text", "text": "Listen"},
+            {"type": "input_audio", "input_audio": {"data": "YWJj", "format": "mp3"}},
+        ]}]
+        prompt = agent._cached_system_prompt or "system"
+        try:
+            assert begin_voice_turn_route(agent, messages, prompt) == prompt
+            assert agent.model == "gemini-2.5-pro"
+            assert agent.base_url.rstrip("/") == main.base_url.rstrip("/")
+            assert agent.reasoning_config == {"enabled": True, "effort": "high"}
+            assert agent._voice_turn_pending is False
+        finally:
+            end_voice_turn_route(agent)
+        assert agent.model == "gemini-2.5-pro"
+        assert messages[0]["content"][1]["input_audio"]["data"] == "YWJj"
+        # Exercise the actual turn prologue as well: it must still expose raw audio
+        # when it reaches the route guard, and the main endpoint must get the bytes.
+        agent._voice_turn_pending = True
+        result = agent.run_conversation(messages[0]["content"])
+        assert result["final_response"] == "heard the clip"
+        assert voice.main_requests() == []
+        request = main.main_requests()[0]
+        assert request["model"] == "gemini-2.5-pro"
+        user = next(row for row in reversed(request["messages"]) if row["role"] == "user")
+        assert any(part.get("type") == "input_audio" and part["input_audio"]["data"] == "YWJj"
+                   for part in user["content"])
+
+
 @pytest.mark.parametrize("model,api_mode,expected", [
     ("gpt-6-astra", "codex_responses", "low"),        # Responses ladder has no "none"
     ("claude-opus-5-5", "anthropic_messages", "low"),  # mandatory thinking

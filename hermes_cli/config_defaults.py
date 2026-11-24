@@ -264,6 +264,9 @@ DEFAULT_CONFIG = {
         # provider or get a last-chance text fallback); "text" = always pre-analyze with
         # vision_analyze and prepend the description. vision_analyze stays a tool regardless.
         "image_input_mode": "auto",
+        # Native audio for known audio-capable main models; otherwise existing voice STT.
+        # "native" still checks capability; "stt" always uses the transcription route.
+        "audio_input_mode": "auto",
         "disabled_toolsets": [],
         # Model name (any reasonable spelling) -> effort level; overrides agent.reasoning_effort
         # when the current model matches. Edit in config.yaml (no CLI support: dots in keys).
@@ -1196,6 +1199,9 @@ DEFAULT_CONFIG = {
     },
 
     "voice": VOICE_DEFAULTS,
+    "audio": {
+        "replay_recent_audio": 3,  # retained native clips on DB-rebuilt turns; 0 = off
+    },
     # Native images (vision_analyze, browser screenshots, replayed user images) are re-sent on every later call.
     "vision": {
         # Byte budget for one embedded image (clamped 64 KiB..4 MiB). Raise it for dense phone

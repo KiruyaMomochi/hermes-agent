@@ -26,6 +26,7 @@ from gateway.config import Platform
 from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter
 from gateway.platforms.base_exec_approval import ea_default_reason_text
+from gateway.run_inbound_audio import append_audio_parts, consume_audio_paths
 from gateway.turn_context import TurnContext
 from hermes_cli.config import cfg_get
 from hermes_cli.plugins_dispatch import stream_held
@@ -1051,27 +1052,27 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         return persist_override, ctx.persist_user_timestamp
 
     def _native_image_run_message(self):
-        """Wrap the user turn as an OpenAI-style multimodal content list when
-        _prepare_inbound_message_text buffered image paths; consume-and-clear so later turns on the
-        same runner never re-attach stale images. Falls back to plain text when nothing is readable."""
+        """Consume native image/audio buffers into one user content list; hints survive persistence."""
         ctx = self._ctx
         from gateway.session_api_turn import api_execution
         api = api_execution.get()
-        if api is not None and isinstance(api.get('content'), list):
-            return api['content']
+        if api is not None:
+            # API admissions own their payload; adapter-native buffers never belong to this turn.
+            return api['content'] if isinstance(api.get('content'), list) else ctx.message
         native_imgs = self._runner._consume_pending_native_image_paths(ctx.session_key)
-        if not native_imgs:
-            return ctx.message
-        try:
-            from agent.image_routing import build_native_content_parts
-            parts, skipped = build_native_content_parts(ctx.message, native_imgs)
-            if skipped:
-                logger.warning("Native image attachment: skipped %d unreadable path(s): %s", len(skipped), skipped)
-            if any(p.get("type") == "image_url" for p in parts):
-                return parts
-        except Exception as exc:
-            logger.warning("Native image attachment failed, falling back to text: %s", exc)
-        return ctx.message
+        parts = []
+        if native_imgs:
+            try:
+                from agent.image_routing import build_native_content_parts
+                parts, skipped = build_native_content_parts(ctx.message, native_imgs)
+                if skipped:
+                    logger.warning("Native image attachment: skipped %d unreadable path(s)", len(skipped))
+            except Exception as exc:
+                logger.warning("Native image attachment failed, falling back to text: %s", exc)
+        audio_paths = consume_audio_paths(self._runner, ctx.session_key)
+        if audio_paths:
+            parts = append_audio_parts(parts, ctx.message, audio_paths)
+        return parts if audio_paths or any(p.get('type') == 'image_url' for p in parts) else ctx.message
 
     def _run_conversation_with_approval(self, agent, agent_history, observed_group_context,
                                         persist_user_message_override, persist_user_timestamp_override):
