@@ -748,6 +748,20 @@ def _scroll(persistence, session_id: str, around_message_id: int, window: int = 
               "means you've hit that end of the session."), **extra)
 
 
+def _with_agy(payload, persistence, profile, limit, **options):
+    if (profile or "").strip() not in ("", "default") or _cross_profile_reads_confined():
+        return payload
+    from tools.agy_sessions import merge
+    def started(entry):
+        meta = _get_session_meta(persistence, entry["session_id"])
+        return _coerce_started_ts(meta.started_at) if meta else None
+    def hydrate(entry):
+        hit = SearchHit(session_id=entry["session_id"], message_id=entry["match_message_id"],
+                        role=entry["matched_role"], snippet=entry["snippet"])
+        return _hydrate_hit(persistence, entry["session_id"], hit, "full")
+    return merge(payload, limit=limit, redact=redact_derived_text, started=started, hydrate=hydrate, **options)
+
+
 def _dispatch(query, role_filter, limit, persistence, current_session_id, session_id,
               around_message_id, window, sort, profile, detail,
               after=None, before=None, exclude_session_ids=None) -> str:
@@ -760,18 +774,22 @@ def _dispatch(query, role_filter, limit, persistence, current_session_id, sessio
     # Browse lists enough recent sessions to pick from; discovery returns a few ranked hits.
     limit = _clamp_int(limit, 10 if browse else 3, 1, 10)
     if browse:
-        return _list_recent_sessions(persistence, limit, current_session_id, link_profile=profile)
+        return _with_agy(_list_recent_sessions(persistence, limit, current_session_id, link_profile=profile),
+                         persistence, profile, limit, current_session_id=current_session_id)
     sort_norm = sort.strip().lower() if isinstance(sort, str) else None
     try:
         after_ts, before_ts = _parse_iso_bound(after), _parse_iso_bound(before)
     except ValueError as e:
         return tool_error(str(e), success=False)
-    return _discover(
+    payload = _discover(
         persistence=persistence, query=query.strip(), limit=limit, sort=sort_norm if sort_norm in ("newest", "oldest") else None,
         role_filter=([r.strip() for r in role_filter.split(",") if r.strip()] or None) if isinstance(role_filter, str) else None,
         detail="full" if isinstance(detail, str) and detail.strip().lower() == "full" else "adaptive",
         current_session_id=current_session_id, link_profile=profile, after_ts=after_ts, before_ts=before_ts,
         exclude_session_ids=_normalize_exclude_session_ids(exclude_session_ids))
+    return _with_agy(payload, persistence, profile, limit, role_filter=role_filter, sort=sort_norm,
+                     after_ts=after_ts, before_ts=before_ts, current_session_id=current_session_id,
+                     exclude_session_ids=_normalize_exclude_session_ids(exclude_session_ids))
 
 
 def session_search(query: str = "", role_filter: str | None = None, limit: int | None = None, db=None,
@@ -791,7 +809,12 @@ def session_search(query: str = "", role_filter: str | None = None, limit: int |
         if emb_id:
             session_id = emb_id
             if emb_profile and (profile is None or not str(profile).strip()):
-                profile = emb_profile
+                profile = emb_profile.removeprefix("@session:")
+    # External transcripts need no state.db, but share the native tenant boundary.
+    if (isinstance(session_id, str) and session_id.strip().startswith("agy:")
+            and (profile or "").strip() in ("", "default") and not _cross_profile_reads_confined()):
+        from tools.agy_sessions import read
+        return read(session_id.strip(), around_message_id, window)
     handles = ExitStack()
     try:
         # Cross-profile: swap in the named profile's store (read-only) for every shape;
