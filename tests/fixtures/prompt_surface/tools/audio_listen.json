@@ -1,5 +1,5 @@
 {
-  "description": "Listen to a local audio file and answer questions about speech, music, sounds, or tone. When native audio is unavailable, returns speech transcription only.",
+  "description": "Listen to local audio and answer questions about speech, music, sounds, or tone. When native audio is unavailable, returns speech transcription only.",
   "name": "audio_listen",
   "parameters": {
     "properties": {

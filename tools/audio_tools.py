@@ -111,7 +111,7 @@ def _handle_audio_listen(args: dict[str, Any], **kwargs: Any) -> str | dict[str,
 AUDIO_LISTEN_SCHEMA = {
     "name": "audio_listen",
     "description": (
-        "Listen to a local audio file and answer questions about speech, music, sounds, or tone. "
+        "Listen to local audio and answer questions about speech, music, sounds, or tone. "
         "When native audio is unavailable, returns speech transcription only."
     ),
     "parameters": {

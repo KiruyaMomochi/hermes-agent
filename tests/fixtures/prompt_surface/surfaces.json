@@ -5,7 +5,7 @@
       "stable": 1829,
       "volatile": 1268
     },
-    "tool_tokens": 9603,
+    "tool_tokens": 9601,
     "tools": [
       "audio_listen",
       "browser_cdp",
@@ -37,7 +37,7 @@
       "stable": 1225,
       "volatile": 1268
     },
-    "tool_tokens": 9603,
+    "tool_tokens": 9601,
     "tools": [
       "audio_listen",
       "browser_cdp",
@@ -69,7 +69,7 @@
       "stable": 1646,
       "volatile": 1266
     },
-    "tool_tokens": 9603,
+    "tool_tokens": 9601,
     "tools": [
       "audio_listen",
       "browser_cdp",
@@ -101,7 +101,7 @@
       "stable": 2420,
       "volatile": 1264
     },
-    "tool_tokens": 9759,
+    "tool_tokens": 9757,
     "tools": [
       "audio_listen",
       "browser_cdp",
@@ -133,7 +133,7 @@
       "stable": 1225,
       "volatile": 1268
     },
-    "tool_tokens": 9603,
+    "tool_tokens": 9601,
     "tools": [
       "audio_listen",
       "browser_cdp",
@@ -165,7 +165,7 @@
       "stable": 1211,
       "volatile": 1268
     },
-    "tool_tokens": 9603,
+    "tool_tokens": 9601,
     "tools": [
       "audio_listen",
       "browser_cdp",
@@ -197,7 +197,7 @@
       "stable": 1495,
       "volatile": 1269
     },
-    "tool_tokens": 10259,
+    "tool_tokens": 10257,
     "tools": [
       "audio_listen",
       "browser_cdp",
@@ -230,7 +230,7 @@
       "stable": 1244,
       "volatile": 1269
     },
-    "tool_tokens": 9603,
+    "tool_tokens": 9601,
     "tools": [
       "audio_listen",
       "browser_cdp",
@@ -262,7 +262,7 @@
       "stable": 1330,
       "volatile": 1269
     },
-    "tool_tokens": 9603,
+    "tool_tokens": 9601,
     "tools": [
       "audio_listen",
       "browser_cdp",
