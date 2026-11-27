@@ -110,6 +110,11 @@ TOOLSETS = {
         "click, type, extract, screenshots), raw CDP, dialogs and vault logins",
         [t for t in _HERMES_CORE_TOOLS if t.startswith("browser_")],
     ),
+    # Overlaps browser deliberately: deny vault access without losing automation.
+    "browser_vault": _ts(
+        "Browser credential vault: saved logins, cards, addresses and one-time codes",
+        ["browser_vault"],
+    ),
     "cronjob": _ts(
         "Cronjob management tool - create, list, update, pause, resume, remove, and "
         "trigger scheduled tasks",
